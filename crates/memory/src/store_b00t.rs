@@ -72,12 +72,23 @@ struct B00tSoulClient {
 
 impl B00tSoulClient {
     fn new(base_url: impl Into<String>) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap_or_else(|error| {
+                warn!(
+                    error = ?error,
+                    "failed to build reqwest client for b00t soul; falling back to client with 2s timeout",
+                );
+                reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(2))
+                    .build()
+                    .expect("failed to build fallback reqwest client with 2s timeout")
+            });
+
         Self {
             base_url: base_url.into(),
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(2))
-                .build()
-                .unwrap_or_default(),
+            http,
         }
     }
 
