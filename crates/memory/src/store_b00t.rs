@@ -246,7 +246,18 @@ impl B00tSoulShim {
     ) -> Result<Option<Vec<f32>>> {
         let key = cache_key(provider, model, hash);
         match self.soul.get(&key).await {
-            Ok(Some(encoded)) => Ok(Some(decode_embedding(&encoded)?)),
+            Ok(Some(encoded)) => match decode_embedding(&encoded) {
+                Ok(vec) => Ok(Some(vec)),
+                Err(e) if self.fallback_on_error => {
+                    warn!(
+                        "b00t soul GET decode failed for key {key}, using local fallback: {e:#}"
+                    );
+                    self.local
+                        .get_cached_embedding(provider, model, hash)
+                        .await
+                },
+                Err(e) => Err(e.into()),
+            },
             Ok(None) => Ok(None),
             Err(e) if self.fallback_on_error => {
                 debug!("b00t soul GET failed, using local fallback: {e:#}");
