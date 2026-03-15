@@ -284,8 +284,9 @@ impl B00tSoulShim {
         let encoded = encode_embedding(embedding);
         match self.soul.put(&key, &encoded).await {
             Ok(()) => {
-                // 🤓 also write to local SQLite so vector_search (FTS) stays
-                //    functional when b00t soul serve is the canonical store.
+                // 🤓 also write to local SQLite so embedding cache hits still
+                //    work and local accounting/eviction remain accurate when
+                //    b00t soul is the canonical K/V store.
                 self.local
                     .put_cached_embedding(provider, model, provider_key, hash, embedding)
                     .await
