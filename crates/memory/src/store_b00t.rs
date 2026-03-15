@@ -30,6 +30,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tracing::{debug, warn};
+use futures::stream::{self, StreamExt};
+
+const MAX_CONCURRENT_SOUL_PUTS: usize = 32;
 
 use crate::{
     schema::{ChunkRow, FileRow},
@@ -363,16 +366,20 @@ impl MemoryStore for B00tSoulShim {
 
     async fn put_cached_embeddings_batch(&self, entries: &[CacheEntry<'_>]) -> Result<()> {
         // 🤓 Batch: fire concurrently to b00t soul, then mirror to local SQLite.
-        //    tokio::join! not usable here (variable arity); use futures::future::join_all.
-        let futs: Vec<_> = entries
-            .iter()
-            .map(|e| {
+        //    Use bounded concurrency to avoid overwhelming the runtime / b00t soul.
+        let results = stream::iter(
+            entries.iter().map(|e| {
                 self.soul_put_embedding(e.provider, e.model, e.provider_key, e.hash, e.embedding)
-            })
-            .collect();
-        for result in futures::future::join_all(futs).await {
+            }),
+        )
+        .buffer_unordered(MAX_CONCURRENT_SOUL_PUTS)
+        .collect::<Vec<_>>()
+        .await;
+
+        for result in results {
             result?;
         }
+
         Ok(())
     }
 
