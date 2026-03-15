@@ -30,9 +30,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tracing::{debug, warn};
-use futures::stream::{self, StreamExt};
-
-const MAX_CONCURRENT_SOUL_PUTS: usize = 32;
+use futures::future::join_all;
 
 use crate::{
     schema::{ChunkRow, FileRow},
@@ -95,11 +93,9 @@ impl B00tSoulClient {
         }
     }
 
-    /// Encode a namespaced key for URL path use with proper percent-encoding.
+    /// Encode a namespaced key for URL path use (encode `/` only — keys use `:` separators).
     fn key_path(key: &str) -> String {
-        // Encode as a single URL path segment: encode all non-alphanumeric bytes.
-        percent_encoding::utf8_percent_encode(key, percent_encoding::NON_ALPHANUMERIC)
-            .to_string()
+        key.replace('/', "%2F")
     }
 
     async fn get(&self, key: &str) -> Result<Option<String>> {
@@ -366,21 +362,15 @@ impl MemoryStore for B00tSoulShim {
     }
 
     async fn put_cached_embeddings_batch(&self, entries: &[CacheEntry<'_>]) -> Result<()> {
-        // 🤓 Batch: fire concurrently to b00t soul, then mirror to local SQLite.
-        //    Use bounded concurrency to avoid overwhelming the runtime / b00t soul.
-        let results = stream::iter(
-            entries.iter().map(|e| {
-                self.soul_put_embedding(e.provider, e.model, e.provider_key, e.hash, e.embedding)
-            }),
-        )
-        .buffer_unordered(MAX_CONCURRENT_SOUL_PUTS)
-        .collect::<Vec<_>>()
-        .await;
-
-        for result in results {
+        // 🤓 join_all not buffer_unordered — CacheEntry<'_> lifetime prevents stream::iter
+        //    from working cleanly with async closures; join_all handles the bounded lifetime.
+        let futs: Vec<_> = entries
+            .iter()
+            .map(|e| self.soul_put_embedding(e.provider, e.model, e.provider_key, e.hash, e.embedding))
+            .collect();
+        for result in join_all(futs).await {
             result?;
         }
-
         Ok(())
     }
 
