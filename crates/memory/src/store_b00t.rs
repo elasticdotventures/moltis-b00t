@@ -252,7 +252,7 @@ impl B00tSoulShim {
             Ok(Some(encoded)) => match decode_embedding(&encoded) {
                 Ok(vec) => Ok(Some(vec)),
                 Err(e) if self.fallback_on_error => {
-                    warn!(
+                    debug!(
                         "b00t soul GET decode failed for key {key}, using local fallback: {e:#}"
                     );
                     self.local
@@ -292,7 +292,7 @@ impl B00tSoulShim {
                     .await
             },
             Err(e) if self.fallback_on_error => {
-                warn!("b00t soul PUT failed, writing local only: {e:#}");
+                debug!("b00t soul PUT failed, writing local only: {e:#}");
                 self.local
                     .put_cached_embedding(provider, model, provider_key, hash, embedding)
                     .await
