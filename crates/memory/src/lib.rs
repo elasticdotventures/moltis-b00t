@@ -18,6 +18,7 @@ pub mod search;
 pub mod session_export;
 pub(crate) mod splitter;
 pub mod store;
+pub mod store_b00t;
 pub mod store_sqlite;
 pub mod tools;
 #[cfg(feature = "file-watcher")]
