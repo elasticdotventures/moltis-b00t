@@ -92,10 +92,11 @@ impl B00tSoulClient {
         }
     }
 
-    /// Encode a namespaced key for URL path use (percent-encode colons etc.)
+    /// Encode a namespaced key for URL path use with proper percent-encoding.
     fn key_path(key: &str) -> String {
-        // reqwest handles percent encoding on .path(); just encode unsafe chars.
-        key.replace('/', "%2F")
+        // Encode as a single URL path segment: encode all non-alphanumeric bytes.
+        percent_encoding::utf8_percent_encode(key, percent_encoding::NON_ALPHANUMERIC)
+            .to_string()
     }
 
     async fn get(&self, key: &str) -> Result<Option<String>> {
