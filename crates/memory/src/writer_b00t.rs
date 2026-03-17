@@ -96,6 +96,55 @@ impl B00tSoulHttpClient {
 
 // ─── Filesystem fallback ──────────────────────────────────────────────────────
 
+/// Validate memory file paths for the local fallback writer.
+///
+/// This mirrors the stricter contract used by the primary `MemoryWriter`:
+/// - allow exactly: `MEMORY.md` or `memory.md`
+/// - or: `memory/<name>.md`
+///   where `<name>`:
+///     - is a single path segment (no `/` or `\`)
+///     - contains no whitespace
+///     - ends with `.md`
+/// Additionally, all backslashes are rejected so Windows-style paths
+/// cannot bypass checks.
+fn validate_memory_path_fallback(file: &str) -> Result<()> {
+    // Reject any use of Windows-style separators.
+    if file.contains('\\') {
+        anyhow::bail!("backslashes not allowed in memory file path: {file}");
+    }
+
+    // Reject leading/trailing whitespace and empty paths.
+    if file.trim().is_empty() || file.trim() != file {
+        anyhow::bail!("whitespace not allowed in memory file path: {file}");
+    }
+
+    match file {
+        "MEMORY.md" | "memory.md" => Ok(()),
+        _ => {
+            const PREFIX: &str = "memory/";
+            if !file.starts_with(PREFIX) {
+                anyhow::bail!("invalid memory file path (must be MEMORY.md, memory.md, or memory/<name>.md): {file}");
+            }
+            let rest = &file[PREFIX.len()..];
+            if rest.is_empty() {
+                anyhow::bail!("memory/<name>.md must include a non-empty <name>: {file}");
+            }
+            // `<name>` must be a single segment with no nested separators.
+            if rest.contains('/') {
+                anyhow::bail!("nested paths not allowed in memory file name: {file}");
+            }
+            // No whitespace inside the name, and must end with `.md`.
+            if rest.chars().any(|c| c.is_whitespace()) {
+                anyhow::bail!("whitespace not allowed in memory file name: {file}");
+            }
+            if !rest.ends_with(".md") {
+                anyhow::bail!("memory file name must end with .md: {file}");
+            }
+            Ok(())
+        }
+    }
+}
+
 struct LocalFallbackWriter {
     base: PathBuf,
 }
@@ -115,6 +164,9 @@ impl LocalFallbackWriter {
     }
 
     async fn write_memory(&self, file: &str, content: &str, append: bool) -> Result<MemoryWriteResult> {
+        // Enforce the same memory path contract as the primary MemoryWriter.
+        validate_memory_path_fallback(file)?;
+
         let file_path = std::path::Path::new(file);
         for component in file_path.components() {
             use std::path::Component;
