@@ -39,6 +39,9 @@ use crate::{
     store_sqlite::SqliteMemoryStore,
 };
 
+/// Maximum number of concurrent `soul_put_embedding` requests in a batch.
+const MAX_CONCURRENT_SOUL_PUT_EMBEDDINGS: usize = 16;
+
 // ─── b00t soul HTTP client ────────────────────────────────────────────────────
 
 /// Default b00t soul serve endpoint.
@@ -362,14 +365,26 @@ impl MemoryStore for B00tSoulShim {
     }
 
     async fn put_cached_embeddings_batch(&self, entries: &[CacheEntry<'_>]) -> Result<()> {
-        // 🤓 join_all not buffer_unordered — CacheEntry<'_> lifetime prevents stream::iter
-        //    from working cleanly with async closures; join_all handles the bounded lifetime.
-        let futs: Vec<_> = entries
-            .iter()
-            .map(|e| self.soul_put_embedding(e.provider, e.model, e.provider_key, e.hash, e.embedding))
-            .collect();
-        for result in join_all(futs).await {
-            result?;
+        // 🤓 Use chunked join_all instead of a single unbounded join_all:
+        //    - CacheEntry<'_> lifetime makes stream::iter + async closures awkward.
+        //    - Chunking restores bounded concurrency while keeping lifetimes simple.
+        for chunk in entries.chunks(MAX_CONCURRENT_SOUL_PUT_EMBEDDINGS) {
+            let futs: Vec<_> = chunk
+                .iter()
+                .map(|e| {
+                    self.soul_put_embedding(
+                        e.provider,
+                        e.model,
+                        e.provider_key,
+                        e.hash,
+                        e.embedding,
+                    )
+                })
+                .collect();
+
+            for result in join_all(futs).await {
+                result?;
+            }
         }
         Ok(())
     }
