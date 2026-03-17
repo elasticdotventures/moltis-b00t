@@ -13,7 +13,7 @@
 //! ```
 //!
 //! # b00t soul serve endpoints used
-//! - `POST /v1/memory/write`  body: `{"file":"SOUL.md","content":"...","append":true}`
+//! - `POST /v1/memory/write`  body: `{"file":"MEMORY.md","content":"...","append":true}`
 //!   → returns `{"location":"...","bytes_written":N}`
 //!
 //! # b00t:map v1
@@ -221,7 +221,7 @@ mod tests {
             fallback: LocalFallbackWriter { base: dir.path().join("._b00t_") },
             fallback_on_error: true,
         };
-        let result = writer.write_memory("SOUL.md", "# Test", false).await.unwrap();
+        let result = writer.write_memory("MEMORY.md", "# Test", false).await.unwrap();
         assert!(result.bytes_written > 0);
         let content = std::fs::read_to_string(&result.location).unwrap();
         assert_eq!(content, "# Test");
@@ -230,7 +230,7 @@ mod tests {
     #[tokio::test]
     async fn writer_strict_errors_on_unreachable_soul() {
         let writer = B00tSoulWriter::with_soul_url("http://127.0.0.1:19999").strict();
-        assert!(writer.write_memory("SOUL.md", "test", false).await.is_err());
+        assert!(writer.write_memory("MEMORY.md", "test", false).await.is_err());
     }
 
     #[tokio::test]
