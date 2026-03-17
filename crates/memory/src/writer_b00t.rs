@@ -157,7 +157,7 @@ impl LocalFallbackWriter {
             .filter(|p| p.is_dir());
         let base = local.unwrap_or_else(|| {
             dirs_next::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .unwrap_or_else(std::env::temp_dir)
                 .join("._b00t_")
         });
         Self { base }
