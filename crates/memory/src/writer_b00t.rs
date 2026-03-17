@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use moltis_agents::memory_writer::{MemoryWriteResult, MemoryWriter};
 
@@ -54,12 +54,24 @@ struct B00tSoulHttpClient {
 
 impl B00tSoulHttpClient {
     fn new(base_url: impl Into<String>) -> Self {
+        let timeout = std::time::Duration::from_secs(5);
+        let http = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .unwrap_or_else(|err| {
+                warn!(
+                    "failed to build reqwest client for B00tSoulHttpClient with timeout {:?}: {err}",
+                    timeout
+                );
+                reqwest::Client::builder()
+                    .timeout(timeout)
+                    .build()
+                    .expect("failed to build fallback reqwest client for B00tSoulHttpClient")
+            });
+
         Self {
             base_url: base_url.into(),
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .build()
-                .unwrap_or_default(),
+            http,
         }
     }
 
