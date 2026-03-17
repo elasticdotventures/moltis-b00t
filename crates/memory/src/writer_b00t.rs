@@ -34,6 +34,10 @@ use moltis_agents::memory_writer::{MemoryWriteResult, MemoryWriter};
 
 const DEFAULT_SOUL_URL: &str = "http://127.0.0.1:7700";
 
+/// Maximum allowed memory write size (bytes).
+/// Mirrors the 50KB cap used by `MemoryManager` to keep behavior consistent.
+const MAX_CONTENT_BYTES: usize = 50 * 1024;
+
 #[derive(Serialize)]
 struct WriteRequest<'a> {
     file: &'a str,
@@ -242,6 +246,16 @@ impl MemoryWriter for B00tSoulWriter {
         content: &str,
         append: bool,
     ) -> Result<MemoryWriteResult> {
+        // Enforce a maximum content size to mirror `MemoryManager`'s 50KB cap and
+        // avoid sending or writing excessively large payloads.
+        if content.len() > MAX_CONTENT_BYTES {
+            anyhow::bail!(
+                "memory write exceeds maximum allowed size of {} bytes (got {} bytes)",
+                MAX_CONTENT_BYTES,
+                content.len()
+            );
+        }
+
         match self.client.write_memory(file, content, append).await {
             Ok(result) => {
                 debug!("soul write via b00t soul serve → {}", result.location);
