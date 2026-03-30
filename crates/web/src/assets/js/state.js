@@ -4,6 +4,7 @@ import * as sig from "./signals.js";
 export var ws = null;
 export var reqId = 0;
 export var connected = false;
+export var subscribed = false;
 export var reconnectDelay = 1000;
 export var pending = {};
 export var models = [];
@@ -119,6 +120,9 @@ export function setReqId(v) {
 export function setConnected(v) {
 	connected = v;
 	sig.connected.value = v;
+}
+export function setSubscribed(v) {
+	subscribed = v;
 }
 export function setReconnectDelay(v) {
 	reconnectDelay = v;

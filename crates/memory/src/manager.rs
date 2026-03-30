@@ -443,6 +443,7 @@ impl MemoryWriter for MemoryManager {
         Ok(MemoryWriteResult {
             location: path.to_string_lossy().into_owned(),
             bytes_written,
+            checkpoint_id: None,
         })
     }
 }

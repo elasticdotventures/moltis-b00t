@@ -136,11 +136,18 @@ Currently encrypted:
 | Data | Storage | AAD |
 |------|---------|-----|
 | Environment variables (`env_variables` table) | SQLite | `env:{key}` |
+| Managed SSH private keys (`ssh_keys` table) | SQLite | `ssh-key:{name}` |
 
-The `encrypted` column in `env_variables` tracks whether each row is
-encrypted (1) or plaintext (0). When the vault is unsealed, new env vars
-are written encrypted. When sealed or uninitialized, they are written as
-plaintext.
+The `encrypted` column in `env_variables` and `ssh_keys` tracks whether each
+row is encrypted (1) or plaintext (0). When the vault is unsealed, new env vars
+and managed SSH private keys are written encrypted. Imported passphrase-protected
+SSH keys are decrypted during import and then stored under the vault-managed
+key hierarchy. When sealed or
+uninitialized, they are written as plaintext.
+
+On the first successful vault unseal after enabling the feature, Moltis also
+migrates any previously stored plaintext env vars and managed SSH private keys
+to encrypted storage in-place.
 
 ```admonish info title="Planned"
 KeyStore (provider API keys in `provider_keys.json`) and TokenStore
@@ -151,15 +158,16 @@ planned after an async refactor.
 
 ## Vault Guard Middleware
 
-When the vault is in the **Sealed** state, a middleware layer blocks API
-requests (except auth and bootstrap endpoints) with `423 Locked`:
+When the vault is in the **Sealed** state, a middleware layer blocks
+vault-protected API requests with `423 Locked`:
 
 ```json
 {"error": "vault is sealed", "status": "sealed"}
 ```
 
-This prevents the application from serving stale or unreadable data when
-the vault needs to be unlocked.
+This prevents the application from serving unreadable encrypted data while
+still allowing access to session history and bootstrap payloads that are not
+yet stored in the vault.
 
 The guard does **not** block when the vault is **Uninitialized** — there's
 nothing to protect yet, and the application needs to function normally for
@@ -168,6 +176,8 @@ initial setup.
 Allowed through regardless of vault state:
 
 - `/api/auth/*` — authentication endpoints (including vault unlock)
+- `/api/bootstrap` — UI bootstrap payload
+- `/api/sessions*` — session history and media endpoints
 - `/api/gon` — server-injected bootstrap data
 - Non-API routes — static assets, HTML pages, health check
 
@@ -212,6 +222,9 @@ When `vault_status` is `sealed`, the UI shows an info banner:
   **Settings > Encryption** for manual unlock.
 - On the login page (`/login`): a banner that explains the vault is locked
   and will unlock after successful sign-in.
+
+The chat/session UI remains visible while sealed because chat history is not
+yet encrypted by the vault.
 
 ### Onboarding and localhost
 

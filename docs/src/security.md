@@ -265,8 +265,9 @@ in Settings > Authentication), unseals automatically on login, and
 re-seals on server restart. A recovery key is provided at initialization
 for emergency access.
 
-When the vault is sealed, a middleware layer blocks API requests with
-`423 Locked` to prevent serving stale data.
+When the vault is sealed, a middleware layer blocks vault-protected API
+requests with `423 Locked`. Session history and bootstrap endpoints remain
+available because those payloads are not yet encrypted at rest.
 
 For full details on the key hierarchy, vault states, API endpoints, and
 cryptographic parameters, see [Encryption at Rest (Vault)](vault.md).

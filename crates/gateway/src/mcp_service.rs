@@ -116,6 +116,24 @@ fn parse_server_config(
         .or_else(|| existing.map(|cfg| cfg.enabled))
         .unwrap_or(true);
 
+    let request_timeout_secs = if let Some(v) = params.get("request_timeout_secs") {
+        if v.is_null() {
+            None
+        } else {
+            let secs = v
+                .as_u64()
+                .ok_or_else(|| ServiceError::message("invalid 'request_timeout_secs' parameter"))?;
+            if secs == 0 {
+                return Err(ServiceError::message(
+                    "'request_timeout_secs' must be greater than 0",
+                ));
+            }
+            Some(secs)
+        }
+    } else {
+        existing.and_then(|cfg| cfg.request_timeout_secs)
+    };
+
     let url = if params.get("url").is_some() {
         if params.get("url").is_some_and(Value::is_null) {
             None
@@ -192,11 +210,18 @@ fn parse_server_config(
         existing.and_then(|cfg| cfg.oauth.clone())
     };
 
+    let display_name = match params.get("display_name") {
+        Some(v) if v.is_null() => None,
+        Some(v) => v.as_str().map(String::from),
+        None => existing.and_then(|cfg| cfg.display_name.clone()),
+    };
+
     Ok(moltis_mcp::McpServerConfig {
         command,
         args,
         env,
         enabled,
+        request_timeout_secs,
         transport,
         url: if matches!(transport, moltis_mcp::TransportType::Sse) {
             url
@@ -205,6 +230,7 @@ fn parse_server_config(
         },
         headers,
         oauth,
+        display_name,
     })
 }
 
@@ -600,6 +626,11 @@ impl McpService for LiveMcpService {
             "name": server_name
         }))
     }
+
+    async fn update_request_timeout(&self, request_timeout_secs: u64) -> ServiceResult {
+        self.manager.set_request_timeout_secs(request_timeout_secs);
+        Ok(serde_json::json!({ "ok": true }))
+    }
 }
 
 #[cfg(test)]
@@ -861,6 +892,31 @@ mod tests {
             merged.get("BRAVE_API_KEY").map(String::as_str),
             Some("config-brave")
         );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    fn parse_server_config_preserves_request_timeout_override() {
+        let existing = moltis_mcp::McpServerConfig {
+            command: "npx".to_string(),
+            args: vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-memory".to_string(),
+            ],
+            request_timeout_secs: Some(90),
+            ..Default::default()
+        };
+
+        let cfg = parse_server_config(
+            &serde_json::json!({
+                "enabled": false
+            }),
+            Some(&existing),
+        )
+        .expect("expected request timeout override to be preserved");
+
+        assert_eq!(cfg.request_timeout_secs, Some(90));
+        assert!(!cfg.enabled);
     }
 
     #[tokio::test]

@@ -989,6 +989,7 @@ impl SessionService for LiveSessionService {
                             target.channel_type.as_str(),
                             &target.account_id,
                             &target.chat_id,
+                            target.thread_id.as_deref(),
                         )
                         .await
                         .map(|k| k == e.key)

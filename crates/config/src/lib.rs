@@ -38,11 +38,12 @@ pub use {
         generic_provider_env, generic_provider_env_source_for_provider, normalize_provider_name,
     },
     schema::{
-        AgentIdentity, AgentPreset, AgentsConfig, AuthConfig, CalDavAccountConfig, CalDavConfig,
-        ChatConfig, GeoLocation, MemoryScope, MessageQueueMode, MoltisConfig, PresetMemoryConfig,
-        PresetToolPolicy, ResolvedIdentity, SessionAccessPolicyConfig, Timezone, ToolMode,
-        UserProfile, VoiceConfig, VoiceElevenLabsConfig, VoiceOpenAiConfig, VoiceSttConfig,
-        VoiceSttProvider, VoiceTtsConfig, VoiceWhisperConfig,
+        AgentIdentity, AgentPreset, AgentsConfig, AuthConfig, CacheRetention, CalDavAccountConfig,
+        CalDavConfig, ChatConfig, GeoLocation, MemoryScope, MessageQueueMode, MoltisConfig,
+        PresetMemoryConfig, PresetToolPolicy, ResolvedIdentity, SessionAccessPolicyConfig,
+        Timezone, ToolMode, ToolRegistryMode, UserProfile, VoiceConfig, VoiceElevenLabsConfig,
+        VoiceOpenAiConfig, VoiceSttConfig, VoiceSttProvider, VoiceTtsConfig, VoiceWhisperConfig,
+        WireApi,
     },
     validate::{Diagnostic, Severity, ValidationResult},
 };

@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use {
     async_graphql::http::{GraphiQLPlugin, GraphiQLSource},
+    async_trait::async_trait,
     axum::{
         Json,
         extract::{FromRequestParts, Request, State, WebSocketUpgrade},
@@ -17,7 +18,12 @@ use {
     serde_json::Value,
 };
 
-use crate::{server::AppState, services::ServiceResult, state::GatewayState};
+use moltis_gateway::{
+    services::{ChatService, ServiceResult},
+    state::GatewayState,
+};
+
+use crate::server::AppState;
 
 /// `SystemInfoService` implementation backed by the gateway's live state.
 ///
@@ -25,6 +31,101 @@ use crate::{server::AppState, services::ServiceResult, state::GatewayState};
 /// heartbeat) rather than delegating to a domain service crate.
 pub struct GatewaySystemInfoService {
     pub state: Arc<GatewayState>,
+}
+
+/// GraphQL chat shim that resolves the live chat service at call time.
+///
+/// GraphQL schema construction happens before the late-bound chat service is
+/// attached. Resolving through `GatewayState::chat()` keeps GraphQL aligned
+/// with RPC/WebSocket behavior after the override is installed.
+pub struct GraphqlChatServiceProxy {
+    pub state: Arc<GatewayState>,
+}
+
+#[async_trait]
+impl ChatService for GraphqlChatServiceProxy {
+    async fn send(&self, params: Value) -> ServiceResult {
+        self.state.chat().await.send(params).await
+    }
+
+    async fn send_sync(&self, params: Value) -> ServiceResult {
+        self.state.chat().await.send_sync(params).await
+    }
+
+    async fn abort(&self, params: Value) -> ServiceResult {
+        self.state.chat().await.abort(params).await
+    }
+
+    async fn cancel_queued(&self, params: Value) -> ServiceResult {
+        self.state.chat().await.cancel_queued(params).await
+    }
+
+    async fn history(&self, params: Value) -> ServiceResult {
+        self.state.chat().await.history(params).await
+    }
+
+    async fn inject(&self, params: Value) -> ServiceResult {
+        self.state.chat().await.inject(params).await
+    }
+
+    async fn clear(&self, params: Value) -> ServiceResult {
+        self.state.chat().await.clear(params).await
+    }
+
+    async fn compact(&self, params: Value) -> ServiceResult {
+        self.state.chat().await.compact(params).await
+    }
+
+    async fn context(&self, params: Value) -> ServiceResult {
+        self.state.chat().await.context(params).await
+    }
+
+    async fn raw_prompt(&self, params: Value) -> ServiceResult {
+        self.state.chat().await.raw_prompt(params).await
+    }
+
+    async fn full_context(&self, params: Value) -> ServiceResult {
+        self.state.chat().await.full_context(params).await
+    }
+
+    async fn active(&self, params: Value) -> ServiceResult {
+        self.state.chat().await.active(params).await
+    }
+
+    async fn active_session_keys(&self) -> Vec<String> {
+        self.state.chat().await.active_session_keys().await
+    }
+
+    async fn active_thinking_text(&self, session_key: &str) -> Option<String> {
+        self.state
+            .chat()
+            .await
+            .active_thinking_text(session_key)
+            .await
+    }
+
+    async fn active_voice_pending(&self, session_key: &str) -> bool {
+        self.state
+            .chat()
+            .await
+            .active_voice_pending(session_key)
+            .await
+    }
+
+    async fn peek(&self, params: Value) -> ServiceResult {
+        self.state.chat().await.peek(params).await
+    }
+}
+
+pub fn build_graphql_schema(state: Arc<GatewayState>) -> moltis_graphql::MoltisSchema {
+    let system_info = Arc::new(GatewaySystemInfoService {
+        state: Arc::clone(&state),
+    });
+    let chat = Arc::new(GraphqlChatServiceProxy {
+        state: Arc::clone(&state),
+    });
+    let services = state.services.to_services_with_chat(system_info, chat);
+    moltis_graphql::build_schema(services, state.graphql_broadcast.clone())
 }
 
 #[async_trait::async_trait]

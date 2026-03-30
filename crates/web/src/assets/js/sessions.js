@@ -19,6 +19,7 @@ import {
 	formatTokens,
 	parseAgentsListPayload,
 	renderAudioPlayer,
+	renderDocument,
 	renderMarkdown,
 	renderScreenshot,
 	sendRpc,
@@ -529,7 +530,12 @@ export function clearSessionHistoryCache(key) {
 // ── New session button ──────────────────────────────────────
 var newSessionBtn = S.$("newSessionBtn");
 newSessionBtn.addEventListener("click", () => {
-	var key = `session:${crypto.randomUUID()}`;
+	var id = crypto.randomUUID
+		? crypto.randomUUID()
+		: ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, (c) =>
+				(c ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4)))).toString(16),
+			);
+	var key = `session:${id}`;
 	var filterId = projectStore.projectFilterId.value;
 	if (currentPrefix === "/chats") {
 		switchSession(key, null, filterId || undefined);
@@ -798,6 +804,14 @@ function renderHistoryToolResult(msg) {
 			var sessionKey = S.activeSessionKey || "main";
 			var mediaSrc = `/api/sessions/${encodeURIComponent(sessionKey)}/media/${encodeURIComponent(filename)}`;
 			renderScreenshot(card, mediaSrc);
+		}
+		// Render persisted document from the media API.
+		if (msg.result.document_ref) {
+			var docStoredName = msg.result.document_ref.split("/").pop();
+			var docDisplayName = msg.result.filename || docStoredName;
+			var docSessionKey = S.activeSessionKey || "main";
+			var docMediaSrc = `/api/sessions/${encodeURIComponent(docSessionKey)}/media/${encodeURIComponent(docStoredName)}`;
+			renderDocument(card, docMediaSrc, docDisplayName, msg.result.mime_type, msg.result.size_bytes);
 		}
 	}
 

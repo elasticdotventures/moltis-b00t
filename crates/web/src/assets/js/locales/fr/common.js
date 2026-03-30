@@ -53,6 +53,7 @@ export default {
 	header: {
 		memoryTooltip: "Mémoire du processus · Mémoire système disponible",
 		settings: "Paramètres",
+		changelog: "Changelog",
 		reportIssue: "Signaler un problème",
 		reportIssueTitle: "Signaler un problème",
 		themeLight: "Thème clair",

@@ -101,6 +101,9 @@ pub async fn install_skill(source: &str, install_dir: &Path) -> anyhow::Result<V
         installed_at_ms: now,
         commit_sha,
         format,
+        quarantined: false,
+        quarantine_reason: None,
+        provenance: None,
         skills: skill_states,
     });
     store.save(&manifest)?;
@@ -253,7 +256,7 @@ fn sanitize_archive_path(path: &Path) -> anyhow::Result<Option<PathBuf>> {
 /// Recursively scan a cloned repo for SKILL.md files.
 /// Returns (Vec<SkillMetadata>, Vec<SkillState>) — metadata for callers and
 /// state entries for the manifest.
-async fn scan_repo_skills(
+pub async fn scan_repo_skills(
     repo_dir: &Path,
     install_dir: &Path,
 ) -> anyhow::Result<(Vec<SkillMetadata>, Vec<SkillState>)> {

@@ -8,7 +8,7 @@ use std::{
 use {
     async_trait::async_trait,
     futures::{SinkExt, StreamExt},
-    moltis_config::schema::ProviderStreamTransport,
+    moltis_config::schema::{ProviderStreamTransport, WireApi},
     secrecy::ExposeSecret,
     tokio_stream::Stream,
     tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::HeaderValue},
@@ -18,8 +18,9 @@ use tracing::{debug, trace, warn};
 
 use {
     super::openai_compat::{
-        SseLineResult, StreamingToolState, finalize_stream, parse_openai_compat_usage,
-        parse_openai_compat_usage_from_payload, parse_tool_calls, process_openai_sse_line,
+        ResponsesStreamState, SseLineResult, StreamingToolState, finalize_responses_stream,
+        finalize_stream, parse_openai_compat_usage, parse_openai_compat_usage_from_payload,
+        parse_tool_calls, process_openai_sse_line, process_responses_sse_line,
         responses_output_index, split_responses_instructions_and_input, strip_think_tags,
         to_openai_tools, to_responses_api_tools,
     },
@@ -35,10 +36,13 @@ pub struct OpenAiProvider {
     provider_name: String,
     client: &'static reqwest::Client,
     stream_transport: ProviderStreamTransport,
+    wire_api: WireApi,
     metadata_cache: tokio::sync::OnceCell<ModelMetadata>,
     tool_mode_override: Option<moltis_config::ToolMode>,
     /// Optional reasoning effort level for o-series models.
     reasoning_effort: Option<moltis_agents::model::ReasoningEffort>,
+    /// Prompt cache retention policy (used for OpenRouter Anthropic passthrough).
+    cache_retention: moltis_config::CacheRetention,
 }
 
 const OPENAI_MODELS_ENDPOINT_PATH: &str = "/models";
@@ -333,7 +337,7 @@ fn models_endpoint(base_url: &str) -> String {
 ///
 /// The Responses API includes `output_index` on most events. Falls back to
 /// `item_index` / `index` for robustness, then to `fallback`.
-async fn fetch_models_from_api(
+pub async fn fetch_models_from_api(
     api_key: secrecy::Secret<String>,
     base_url: String,
 ) -> anyhow::Result<Vec<super::DiscoveredModel>> {
@@ -429,9 +433,11 @@ impl OpenAiProvider {
             provider_name: "openai".into(),
             client: crate::shared_http_client(),
             stream_transport: ProviderStreamTransport::Sse,
+            wire_api: WireApi::ChatCompletions,
             metadata_cache: tokio::sync::OnceCell::new(),
             tool_mode_override: None,
             reasoning_effort: None,
+            cache_retention: moltis_config::CacheRetention::Short,
         }
     }
 
@@ -448,10 +454,18 @@ impl OpenAiProvider {
             provider_name,
             client: crate::shared_http_client(),
             stream_transport: ProviderStreamTransport::Sse,
+            wire_api: WireApi::ChatCompletions,
             metadata_cache: tokio::sync::OnceCell::new(),
             tool_mode_override: None,
             reasoning_effort: None,
+            cache_retention: moltis_config::CacheRetention::Short,
         }
+    }
+
+    #[must_use]
+    pub fn with_cache_retention(mut self, cache_retention: moltis_config::CacheRetention) -> Self {
+        self.cache_retention = cache_retention;
+        self
     }
 
     #[must_use]
@@ -463,6 +477,12 @@ impl OpenAiProvider {
     #[must_use]
     pub fn with_tool_mode(mut self, mode: moltis_config::ToolMode) -> Self {
         self.tool_mode_override = Some(mode);
+        self
+    }
+
+    #[must_use]
+    pub fn with_wire_api(mut self, wire_api: WireApi) -> Self {
+        self.wire_api = wire_api;
         self
     }
 
@@ -618,6 +638,96 @@ impl OpenAiProvider {
             .is_some_and(|host| host.eq_ignore_ascii_case("api.openai.com"))
     }
 
+    /// Returns `true` when this provider targets an Anthropic model via
+    /// OpenRouter, which supports prompt caching when `cache_control`
+    /// breakpoints are present in the message payload.
+    fn is_openrouter_anthropic(&self) -> bool {
+        self.base_url.contains("openrouter.ai") && self.model.starts_with("anthropic/")
+    }
+
+    /// For OpenRouter Anthropic models, inject `cache_control` breakpoints
+    /// on the system message and the last user message to enable prompt
+    /// caching passthrough to Anthropic.
+    fn apply_openrouter_cache_control(&self, messages: &mut [serde_json::Value]) {
+        if !self.is_openrouter_anthropic()
+            || matches!(self.cache_retention, moltis_config::CacheRetention::None)
+        {
+            return;
+        }
+
+        let cache_control = serde_json::json!({ "type": "ephemeral" });
+
+        // Add cache_control to the system message content.
+        for msg in messages.iter_mut() {
+            if msg.get("role").and_then(serde_json::Value::as_str) != Some("system") {
+                continue;
+            }
+            match msg.get_mut("content") {
+                Some(content) if content.is_string() => {
+                    let text = content.as_str().unwrap_or_default().to_string();
+                    msg["content"] = serde_json::json!([{
+                        "type": "text",
+                        "text": text,
+                        "cache_control": cache_control
+                    }]);
+                },
+                Some(content) if content.is_array() => {
+                    if let Some(last) = content.as_array_mut().and_then(|a| a.last_mut()) {
+                        last["cache_control"] = cache_control.clone();
+                    }
+                },
+                _ => {},
+            }
+            break;
+        }
+
+        // Add cache_control to the last user message.
+        if let Some(last_user) = messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.get("role").and_then(serde_json::Value::as_str) == Some("user"))
+        {
+            match last_user.get_mut("content") {
+                Some(content) if content.is_string() => {
+                    let text = content.as_str().unwrap_or_default().to_string();
+                    last_user["content"] = serde_json::json!([{
+                        "type": "text",
+                        "text": text,
+                        "cache_control": cache_control
+                    }]);
+                },
+                Some(content) if content.is_array() => {
+                    if let Some(last) = content.as_array_mut().and_then(|a| a.last_mut()) {
+                        last["cache_control"] = cache_control;
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+
+    /// Build the HTTP URL for the Responses API (`/responses`).
+    ///
+    /// If the base URL already ends with `/responses`, use it as-is.
+    /// Otherwise derive it as a sibling of `/chat/completions`, ensuring
+    /// `/v1` is present — matching the normalization in
+    /// `responses_websocket_url`.
+    fn responses_sse_url(&self) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        if base.ends_with("/responses") {
+            return base.to_string();
+        }
+        if let Some(prefix) = base.strip_suffix("/chat/completions") {
+            return format!("{prefix}/responses");
+        }
+        // Ensure /v1 is present, consistent with responses_websocket_url.
+        if base.ends_with("/v1") {
+            format!("{base}/responses")
+        } else {
+            format!("{base}/v1/responses")
+        }
+    }
+
     fn responses_websocket_url(&self) -> crate::error::Result<String> {
         let mut base = self.base_url.trim_end_matches('/').to_string();
         if !base.ends_with("/v1") {
@@ -636,6 +746,143 @@ impl OpenAiProvider {
         )))
     }
 
+    /// Stream using the OpenAI Responses API format (`/responses`) over SSE.
+    #[allow(clippy::collapsible_if)]
+    fn stream_responses_sse(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+        Box::pin(async_stream::stream! {
+            let (instructions, input) = split_responses_instructions_and_input(messages);
+            let mut body = serde_json::json!({
+                "model": self.model,
+                "input": input,
+                "stream": true,
+            });
+
+            if let Some(instructions) = instructions {
+                body["instructions"] = serde_json::Value::String(instructions);
+            }
+
+            if !tools.is_empty() {
+                body["tools"] = serde_json::Value::Array(to_responses_api_tools(&tools));
+                body["tool_choice"] = serde_json::json!("auto");
+            }
+
+            self.apply_reasoning_effort_responses(&mut body);
+
+            debug!(
+                model = %self.model,
+                tools_count = tools.len(),
+                "openai stream_responses_sse request"
+            );
+            trace!(body = %serde_json::to_string(&body).unwrap_or_default(), "openai responses stream request body");
+
+            let url = self.responses_sse_url();
+            let resp = match self
+                .client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", self.api_key.expose_secret()))
+                .header("content-type", "application/json")
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => {
+                    if let Err(e) = r.error_for_status_ref() {
+                        let status = e.status().map(|s| s.as_u16()).unwrap_or(0);
+                        let retry_after_ms = super::retry_after_ms_from_headers(r.headers());
+                        let body_text = r.text().await.unwrap_or_default();
+                        yield StreamEvent::Error(super::with_retry_after_marker(
+                            format!("HTTP {status}: {body_text}"),
+                            retry_after_ms,
+                        ));
+                        return;
+                    }
+                    r
+                }
+                Err(e) => {
+                    yield StreamEvent::Error(e.to_string());
+                    return;
+                }
+            };
+
+            let mut byte_stream = resp.bytes_stream();
+            let mut buf = String::new();
+            let mut state = ResponsesStreamState::default();
+            let mut stream_done = false;
+
+            while let Some(chunk) = byte_stream.next().await {
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    Err(e) => {
+                        yield StreamEvent::Error(e.to_string());
+                        return;
+                    }
+                };
+                buf.push_str(&String::from_utf8_lossy(&chunk));
+
+                while let Some(pos) = buf.find('\n') {
+                    let line = buf[..pos].trim().to_string();
+                    buf = buf[pos + 1..].to_string();
+
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    let Some(data) = line
+                        .strip_prefix("data: ")
+                        .or_else(|| line.strip_prefix("data:"))
+                    else {
+                        // Handle bare event types (e.g. "event: response.completed")
+                        continue;
+                    };
+
+                    match process_responses_sse_line(data, &mut state) {
+                        SseLineResult::Done => {
+                            stream_done = true;
+                            break;
+                        }
+                        SseLineResult::Events(events) => {
+                            for event in events {
+                                yield event;
+                            }
+                        }
+                        SseLineResult::Skip => {}
+                    }
+                }
+                if stream_done {
+                    break;
+                }
+            }
+
+            // Process any residual buffered line on EOF.
+            if !stream_done {
+                let line = buf.trim().to_string();
+                if !line.is_empty()
+                    && let Some(data) = line
+                        .strip_prefix("data: ")
+                        .or_else(|| line.strip_prefix("data:"))
+                {
+                    match process_responses_sse_line(data, &mut state) {
+                        SseLineResult::Done | SseLineResult::Skip => {}
+                        SseLineResult::Events(events) => {
+                            for event in events {
+                                yield event;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Finalize: emit pending ToolCallComplete events + Done with usage.
+            for event in finalize_responses_stream(&mut state) {
+                yield event;
+            }
+        })
+    }
+
     #[allow(clippy::collapsible_if)]
     fn stream_with_tools_sse(
         &self,
@@ -644,7 +891,8 @@ impl OpenAiProvider {
     ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
         Box::pin(async_stream::stream! {
             let serialized_messages = self.serialize_messages_for_request(&messages);
-            let (openai_messages, system_prompt) = self.prepare_request_messages(serialized_messages);
+            let (mut openai_messages, system_prompt) = self.prepare_request_messages(serialized_messages);
+            self.apply_openrouter_cache_control(&mut openai_messages);
             let mut body = serde_json::json!({
                 "model": self.model,
                 "messages": openai_messages,
@@ -996,6 +1244,166 @@ impl OpenAiProvider {
             });
         })
     }
+
+    /// Non-streaming completion using the Responses API.
+    ///
+    /// Sends `stream: true` and collects events into a single response, since
+    /// many Responses API endpoints only support streaming.
+    async fn complete_responses(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> anyhow::Result<CompletionResponse> {
+        let (instructions, input) = split_responses_instructions_and_input(messages.to_vec());
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "input": input,
+            "stream": true,
+        });
+        if let Some(instructions) = instructions {
+            body["instructions"] = serde_json::Value::String(instructions);
+        }
+        if !tools.is_empty() {
+            body["tools"] = serde_json::Value::Array(to_responses_api_tools(tools));
+            body["tool_choice"] = serde_json::json!("auto");
+        }
+
+        debug!(
+            model = %self.model,
+            messages_count = messages.len(),
+            tools_count = tools.len(),
+            "openai complete_responses request"
+        );
+        trace!(body = %serde_json::to_string(&body).unwrap_or_default(), "openai responses request body");
+
+        let url = self.responses_sse_url();
+        let http_resp = self
+            .client
+            .post(&url)
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.api_key.expose_secret()),
+            )
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = http_resp.status();
+        if !status.is_success() {
+            let retry_after_ms = super::retry_after_ms_from_headers(http_resp.headers());
+            let body_text = http_resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "{}",
+                super::with_retry_after_marker(
+                    format!("Responses API error HTTP {status}: {body_text}"),
+                    retry_after_ms,
+                )
+            );
+        }
+
+        // Collect SSE events into text + tool calls.
+        let mut text_buf = String::new();
+        let mut fn_call_ids: Vec<String> = Vec::new();
+        let mut fn_call_names: Vec<String> = Vec::new();
+        let mut fn_call_args: Vec<String> = Vec::new();
+        let mut input_tokens: u32 = 0;
+        let mut output_tokens: u32 = 0;
+
+        let full_body = http_resp.text().await.unwrap_or_default();
+        for line in full_body.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some(data) = line
+                .strip_prefix("data: ")
+                .or_else(|| line.strip_prefix("data:"))
+            else {
+                continue;
+            };
+            if data == "[DONE]" {
+                break;
+            }
+
+            let Ok(evt) = serde_json::from_str::<serde_json::Value>(data) else {
+                continue;
+            };
+
+            match evt["type"].as_str().unwrap_or("") {
+                "response.output_text.delta" => {
+                    if let Some(delta) = evt["delta"].as_str() {
+                        text_buf.push_str(delta);
+                    }
+                },
+                "response.output_item.added" => {
+                    if evt["item"]["type"].as_str() == Some("function_call") {
+                        fn_call_ids.push(evt["item"]["call_id"].as_str().unwrap_or("").to_string());
+                        fn_call_names.push(evt["item"]["name"].as_str().unwrap_or("").to_string());
+                        fn_call_args.push(String::new());
+                    }
+                },
+                "response.function_call_arguments.delta" => {
+                    if let Some(delta) = evt["delta"].as_str()
+                        && let Some(last) = fn_call_args.last_mut()
+                    {
+                        last.push_str(delta);
+                    }
+                },
+                "response.completed" => {
+                    if let Some(u) = evt["response"]["usage"].as_object() {
+                        input_tokens =
+                            u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                        output_tokens =
+                            u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    }
+                },
+                "error" | "response.failed" => {
+                    let msg = evt["error"]["message"]
+                        .as_str()
+                        .or_else(|| evt["response"]["error"]["message"].as_str())
+                        .or_else(|| evt["message"].as_str())
+                        .unwrap_or("unknown error");
+                    anyhow::bail!("Responses API error: {msg}");
+                },
+                _ => {},
+            }
+        }
+
+        let text = if text_buf.is_empty() {
+            None
+        } else {
+            Some(text_buf)
+        };
+
+        let tool_calls: Vec<moltis_agents::model::ToolCall> = fn_call_ids
+            .into_iter()
+            .zip(fn_call_names)
+            .zip(fn_call_args)
+            .filter_map(|((id, name), args)| {
+                let arguments: serde_json::Value = serde_json::from_str(&args)
+                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                if name.is_empty() {
+                    return None;
+                }
+                Some(moltis_agents::model::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                })
+            })
+            .collect();
+
+        Ok(CompletionResponse {
+            text,
+            tool_calls,
+            usage: Usage {
+                input_tokens,
+                output_tokens,
+                ..Default::default()
+            },
+        })
+    }
 }
 
 #[async_trait]
@@ -1022,6 +1430,8 @@ impl LlmProvider for OpenAiProvider {
             metadata_cache: tokio::sync::OnceCell::new(),
             tool_mode_override: self.tool_mode_override,
             reasoning_effort: Some(effort),
+            wire_api: self.wire_api,
+            cache_retention: self.cache_retention,
         }))
     }
 
@@ -1103,8 +1513,14 @@ impl LlmProvider for OpenAiProvider {
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
     ) -> anyhow::Result<CompletionResponse> {
+        if matches!(self.wire_api, WireApi::Responses) {
+            return self.complete_responses(messages, tools).await;
+        }
+
         let serialized_messages = self.serialize_messages_for_request(messages);
-        let (openai_messages, system_prompt) = self.prepare_request_messages(serialized_messages);
+        let (mut openai_messages, system_prompt) =
+            self.prepare_request_messages(serialized_messages);
+        self.apply_openrouter_cache_control(&mut openai_messages);
         let mut body = serde_json::json!({
             "model": self.model,
             "messages": openai_messages,
@@ -1208,12 +1624,26 @@ impl LlmProvider for OpenAiProvider {
         messages: Vec<ChatMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
-        match self.stream_transport {
-            ProviderStreamTransport::Sse => self.stream_with_tools_sse(messages, tools),
-            ProviderStreamTransport::Websocket => {
+        match (self.wire_api, self.stream_transport) {
+            (WireApi::Responses, ProviderStreamTransport::Sse) => {
+                self.stream_responses_sse(messages, tools)
+            },
+            (WireApi::Responses, _) => {
+                // WebSocket / Auto both go through the WS path which already
+                // uses the responses format.
+                self.stream_with_tools_websocket(
+                    messages,
+                    tools,
+                    matches!(self.stream_transport, ProviderStreamTransport::Auto),
+                )
+            },
+            (WireApi::ChatCompletions, ProviderStreamTransport::Sse) => {
+                self.stream_with_tools_sse(messages, tools)
+            },
+            (WireApi::ChatCompletions, ProviderStreamTransport::Websocket) => {
                 self.stream_with_tools_websocket(messages, tools, false)
             },
-            ProviderStreamTransport::Auto => {
+            (WireApi::ChatCompletions, ProviderStreamTransport::Auto) => {
                 self.stream_with_tools_websocket(messages, tools, true)
             },
         }
@@ -1482,7 +1912,58 @@ mod tests {
         assert!(
             history
                 .iter()
-                .all(|entry| entry["role"].as_str() != Some("system"))
+                .all(|entry| entry["role"].as_str() != Some("system")),
+            "system messages must not appear in the messages array for MiniMax"
+        );
+    }
+
+    /// Regression test for <https://github.com/moltis-org/moltis/issues/508>:
+    /// MiniMax API returns error 2013 ("invalid chat setting") when
+    /// `role: "system"` messages appear in the messages array. System messages
+    /// must be extracted into the top-level `"system"` field instead.
+    #[tokio::test]
+    async fn minimax_stream_never_sends_system_role_in_messages_regression_508() {
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n\
+                   data: [DONE]\n\n";
+        let (base_url, captured) = start_sse_mock(sse.to_string()).await;
+
+        // Detect MiniMax via provider name (as configured by users)
+        let provider = OpenAiProvider::new_with_name(
+            Secret::new("test-key".to_string()),
+            "MiniMax-M2.7".to_string(),
+            base_url,
+            "minimax".to_string(),
+        );
+        assert!(
+            provider.requires_top_level_system_prompt(),
+            "minimax provider must use top-level system prompt"
+        );
+
+        let messages = vec![
+            ChatMessage::system("you are a helpful assistant"),
+            ChatMessage::user("hello"),
+            ChatMessage::system("extra context"),
+        ];
+
+        let mut stream = provider.stream_with_tools(messages, vec![]);
+        while stream.next().await.is_some() {}
+
+        let reqs = captured.lock().unwrap();
+        let body = reqs[0].body.as_ref().expect("request should have a body");
+
+        // System prompt must be in the top-level field, not in messages
+        assert_eq!(
+            body["system"],
+            "you are a helpful assistant\n\nextra context"
+        );
+
+        let history = body["messages"]
+            .as_array()
+            .expect("messages should be an array");
+        assert_eq!(history.len(), 1, "only the user message should remain");
+        assert!(
+            history.iter().all(|m| m["role"].as_str() != Some("system")),
+            "no system role messages should be in the array (MiniMax error 2013)"
         );
     }
 
@@ -1996,6 +2477,246 @@ mod tests {
         }
     }
 
+    // ============================================================
+    // Tests for WireApi / responses_sse_url
+    // ============================================================
+
+    #[test]
+    fn responses_sse_url_from_v1_base() {
+        let provider = OpenAiProvider::new(
+            Secret::new("test".to_string()),
+            "gpt-5.2".to_string(),
+            "https://example.com/v1".to_string(),
+        );
+        assert_eq!(
+            provider.responses_sse_url(),
+            "https://example.com/v1/responses"
+        );
+    }
+
+    #[test]
+    fn responses_sse_url_from_chat_completions_base() {
+        let provider = OpenAiProvider::new(
+            Secret::new("test".to_string()),
+            "gpt-5.2".to_string(),
+            "https://example.com/v1/chat/completions".to_string(),
+        );
+        assert_eq!(
+            provider.responses_sse_url(),
+            "https://example.com/v1/responses"
+        );
+    }
+
+    #[test]
+    fn responses_sse_url_already_responses() {
+        let provider = OpenAiProvider::new(
+            Secret::new("test".to_string()),
+            "gpt-5.2".to_string(),
+            "https://example.com/v1/responses".to_string(),
+        );
+        assert_eq!(
+            provider.responses_sse_url(),
+            "https://example.com/v1/responses"
+        );
+    }
+
+    #[test]
+    fn responses_sse_url_trailing_slash() {
+        let provider = OpenAiProvider::new(
+            Secret::new("test".to_string()),
+            "gpt-5.2".to_string(),
+            "https://example.com/v1/".to_string(),
+        );
+        assert_eq!(
+            provider.responses_sse_url(),
+            "https://example.com/v1/responses"
+        );
+    }
+
+    #[test]
+    fn responses_sse_url_bare_host_appends_v1() {
+        let provider = OpenAiProvider::new(
+            Secret::new("test".to_string()),
+            "gpt-5.2".to_string(),
+            "https://api.openai.com".to_string(),
+        );
+        assert_eq!(
+            provider.responses_sse_url(),
+            "https://api.openai.com/v1/responses"
+        );
+    }
+
+    #[test]
+    fn with_wire_api_builder() {
+        let provider = OpenAiProvider::new(
+            Secret::new("test".to_string()),
+            "gpt-5.2".to_string(),
+            "https://example.com/v1".to_string(),
+        )
+        .with_wire_api(WireApi::Responses);
+        assert_eq!(provider.wire_api, WireApi::Responses);
+    }
+
+    /// Start a mock SSE server at `/responses` that returns the given payload.
+    async fn start_responses_mock(
+        sse_payload: String,
+    ) -> (String, Arc<Mutex<Vec<CapturedRequest>>>) {
+        let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = captured.clone();
+
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |req: Request| {
+                let cap = captured_clone.clone();
+                let payload = sse_payload.clone();
+                async move {
+                    let body_bytes = axum::body::to_bytes(req.into_body(), 1024 * 1024)
+                        .await
+                        .unwrap_or_default();
+                    let body: Option<serde_json::Value> = serde_json::from_slice(&body_bytes).ok();
+                    cap.lock().unwrap().push(CapturedRequest { body });
+
+                    axum::response::Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .body(axum::body::Body::from(payload))
+                        .unwrap()
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        (format!("http://{addr}"), captured)
+    }
+
+    #[tokio::test]
+    async fn responses_sse_stream_text_delta() {
+        let sse = "\
+            data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello \"}\n\n\
+            data: {\"type\":\"response.output_text.delta\",\"delta\":\"world\"}\n\n\
+            data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}}\n\n";
+        let (base_url, captured) = start_responses_mock(sse.to_string()).await;
+        let provider = OpenAiProvider::new(
+            Secret::new("test-key".to_string()),
+            "test-model".to_string(),
+            base_url,
+        )
+        .with_wire_api(WireApi::Responses);
+
+        let mut stream = provider.stream_with_tools(vec![ChatMessage::user("hi")], vec![]);
+        let mut text = String::new();
+        let mut done_count = 0u32;
+        let mut done_usage = None;
+        let mut raw_count = 0u32;
+        while let Some(event) = stream.next().await {
+            match event {
+                StreamEvent::Delta(d) => text.push_str(&d),
+                StreamEvent::Done(u) => {
+                    done_count += 1;
+                    done_usage = Some(u);
+                },
+                StreamEvent::ProviderRaw(_) => raw_count += 1,
+                _ => {},
+            }
+        }
+        assert_eq!(text, "hello world");
+        let usage = done_usage.expect("should have received Done event");
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 2);
+        // Must emit exactly one Done — no double-Done on EOF.
+        assert_eq!(
+            done_count, 1,
+            "expected exactly 1 Done event, got {done_count}"
+        );
+        // Must emit ProviderRaw for each non-completed SSE event (2 delta lines).
+        assert!(
+            raw_count >= 2,
+            "expected at least 2 ProviderRaw events, got {raw_count}"
+        );
+
+        // Verify the request used Responses API format (input, not messages)
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        let body = reqs[0].body.as_ref().unwrap();
+        assert!(
+            body.get("input").is_some(),
+            "should use 'input' not 'messages'"
+        );
+        assert!(body.get("messages").is_none(), "should not have 'messages'");
+        assert_eq!(body["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn responses_sse_stream_with_tool_calls() {
+        let sse = "\
+            data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_abc\",\"name\":\"exec\"}}\n\n\
+            data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}\n\n\
+            data: {\"type\":\"response.function_call_arguments.done\",\"output_index\":0}\n\n\
+            data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}}\n\n";
+        let (base_url, _) = start_responses_mock(sse.to_string()).await;
+
+        let provider = OpenAiProvider::new(
+            Secret::new("test-key".to_string()),
+            "test-model".to_string(),
+            base_url,
+        )
+        .with_wire_api(WireApi::Responses);
+
+        let tools = sample_tools();
+        let mut stream = provider.stream_with_tools(vec![ChatMessage::user("run ls")], tools);
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event);
+        }
+
+        // Should have ToolCallStart, ToolCallArgumentsDelta, ToolCallComplete, Done
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::ToolCallStart { name, .. } if name == "exec"))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::ToolCallArgumentsDelta { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::ToolCallComplete { index } if *index == 0))
+        );
+        assert!(events.iter().any(|e| matches!(e, StreamEvent::Done(_))));
+    }
+
+    #[tokio::test]
+    async fn responses_sse_stream_error() {
+        let sse = "\
+            data: {\"type\":\"error\",\"error\":{\"message\":\"rate limited\"}}\n\n";
+        let (base_url, _) = start_responses_mock(sse.to_string()).await;
+
+        let provider = OpenAiProvider::new(
+            Secret::new("test-key".to_string()),
+            "test-model".to_string(),
+            base_url,
+        )
+        .with_wire_api(WireApi::Responses);
+
+        let mut stream = provider.stream_with_tools(vec![ChatMessage::user("hi")], vec![]);
+        // First event is ProviderRaw, second is the Error.
+        let first = stream.next().await.expect("should emit ProviderRaw");
+        assert!(matches!(first, StreamEvent::ProviderRaw(_)));
+        let second = stream.next().await.expect("should emit error");
+        assert!(matches!(second, StreamEvent::Error(msg) if msg == "rate limited"));
+    }
+
+    // ============================================================
+    // Tests for reasoning effort
+    // ============================================================
+
     #[test]
     fn apply_reasoning_effort_chat_injects_top_level_field() {
         let mut provider = OpenAiProvider::new(
@@ -2059,5 +2780,73 @@ mod tests {
             Some(ReasoningEffort::Medium)
         );
         assert_eq!(with_effort.id(), "o3");
+    }
+
+    #[test]
+    fn openrouter_anthropic_injects_cache_control_on_system_and_last_user() {
+        let provider = OpenAiProvider::new_with_name(
+            Secret::new("key".into()),
+            "anthropic/claude-sonnet-4-20250514".into(),
+            "https://openrouter.ai/api/v1".into(),
+            "openrouter".into(),
+        );
+
+        let mut messages = vec![
+            serde_json::json!({"role": "system", "content": "You are helpful."}),
+            serde_json::json!({"role": "user", "content": "hello"}),
+            serde_json::json!({"role": "assistant", "content": "hi there"}),
+            serde_json::json!({"role": "user", "content": "bye"}),
+        ];
+
+        provider.apply_openrouter_cache_control(&mut messages);
+
+        // System message converted to content-block array with cache_control.
+        let sys_content = messages[0]["content"].as_array().expect("should be array");
+        assert_eq!(sys_content.len(), 1);
+        assert_eq!(sys_content[0]["text"], "You are helpful.");
+        assert_eq!(sys_content[0]["cache_control"]["type"], "ephemeral");
+
+        // First user message should NOT have cache_control.
+        assert_eq!(messages[1]["content"], "hello");
+
+        // Last user message should have cache_control.
+        let last_user_content = messages[3]["content"].as_array().expect("should be array");
+        assert_eq!(last_user_content[0]["text"], "bye");
+        assert_eq!(last_user_content[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn non_openrouter_skips_cache_control() {
+        let provider = OpenAiProvider::new(
+            Secret::new("key".into()),
+            "gpt-4o".into(),
+            "https://api.openai.com/v1".into(),
+        );
+
+        let mut messages = vec![
+            serde_json::json!({"role": "system", "content": "sys"}),
+            serde_json::json!({"role": "user", "content": "hello"}),
+        ];
+
+        provider.apply_openrouter_cache_control(&mut messages);
+
+        // Nothing should change for non-OpenRouter providers.
+        assert_eq!(messages[0]["content"], "sys");
+        assert_eq!(messages[1]["content"], "hello");
+    }
+
+    #[test]
+    fn openrouter_non_anthropic_model_skips_cache_control() {
+        let provider = OpenAiProvider::new_with_name(
+            Secret::new("key".into()),
+            "openai/gpt-4o".into(),
+            "https://openrouter.ai/api/v1".into(),
+            "openrouter".into(),
+        );
+
+        let mut messages = vec![serde_json::json!({"role": "user", "content": "hello"})];
+
+        provider.apply_openrouter_cache_control(&mut messages);
+        assert_eq!(messages[0]["content"], "hello");
     }
 }

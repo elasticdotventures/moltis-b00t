@@ -350,6 +350,21 @@ pub struct ContextFile {
     pub path: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub warnings: Option<Vec<ContextWarning>>,
+}
+
+#[derive(Debug, SimpleObject, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextWarning {
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub severity: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 // ── Channels ────────────────────────────────────────────────────────────────
@@ -582,6 +597,8 @@ pub struct McpServer {
     pub url: Option<String>,
     #[serde(default)]
     pub tool_count: Option<u64>,
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, SimpleObject, Deserialize)]

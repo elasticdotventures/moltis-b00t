@@ -9,6 +9,7 @@ pub mod install;
 pub mod manifest;
 pub mod migration;
 pub mod parse;
+pub mod portability;
 pub mod prompt_gen;
 pub mod registry;
 pub mod requirements;

@@ -218,7 +218,7 @@ pub async fn handle_node(action: NodeAction) -> Result<()> {
     }
 }
 
-// ── Gateway RPC helpers ─────────────────────────────────────────────────���──
+// ── Gateway RPC helpers ────────────────────────────────────────────────────
 
 /// Call `device.token.create` on the gateway and print the token + command.
 async fn cmd_generate_token(host: &str, api_key: Option<&str>, name: Option<&str>) -> Result<()> {

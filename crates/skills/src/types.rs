@@ -71,7 +71,24 @@ pub struct RepoEntry {
     pub commit_sha: Option<String>,
     #[serde(default)]
     pub format: PluginFormat,
+    #[serde(default)]
+    pub quarantined: bool,
+    #[serde(default)]
+    pub quarantine_reason: Option<String>,
+    #[serde(default)]
+    pub provenance: Option<RepoProvenance>,
     pub skills: Vec<SkillState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoProvenance {
+    pub original_source: String,
+    #[serde(default)]
+    pub original_commit_sha: Option<String>,
+    #[serde(default)]
+    pub imported_from: Option<String>,
+    #[serde(default)]
+    pub exported_at_ms: Option<u64>,
 }
 
 /// Per-skill enabled state within a repo.
@@ -123,10 +140,22 @@ pub enum SkillSource {
 
 /// Lightweight metadata parsed from SKILL.md frontmatter.
 /// Loaded at startup for all discovered skills (cheap).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Default::default()` leaves `name` as `""` (invalid per `validate_name`).
+/// Always initialise `name` explicitly, e.g.
+/// `SkillMetadata { name: "my-skill".into(), ..Default::default() }`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SkillMetadata {
-    /// Skill name — lowercase, hyphens allowed, 1-64 chars.
+    /// Internal skill name — lowercase, hyphens allowed, 1-64 chars.
+    /// When frontmatter `name` is human-readable (e.g. "SEO (Audit + Writer)"),
+    /// this is populated from `slug` instead, and the original is stored in `display_name`.
     pub name: String,
+    /// Optional slug from frontmatter; used as internal name when `name` fails validation.
+    #[serde(default)]
+    pub slug: Option<String>,
+    /// Human-readable display name, set when `name` was swapped with `slug`.
+    #[serde(default)]
+    pub display_name: Option<String>,
     /// Short human-readable description.
     #[serde(default)]
     pub description: String,

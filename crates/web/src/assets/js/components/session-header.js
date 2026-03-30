@@ -36,6 +36,20 @@ function buildShareUrl(payload) {
 	return url;
 }
 
+function isSshTargetNode(node) {
+	return node?.platform === "ssh" || String(node?.nodeId || "").startsWith("ssh:");
+}
+
+function nodeOptionLabel(node) {
+	if (!node) return "Local";
+	if (node.displayName) return node.displayName;
+	if (isSshTargetNode(node)) {
+		var target = String(node.nodeId || "").replace(/^ssh:/, "");
+		return `SSH: ${target}`;
+	}
+	return node.nodeId;
+}
+
 async function copyShareUrl(url, visibility) {
 	try {
 		if (navigator.clipboard?.writeText) {
@@ -347,14 +361,15 @@ export function SessionHeader({
 		{ value: "", label: "Local" },
 		...nodeOptions.map((node) => ({
 			value: node.nodeId,
-			label: node.displayName || node.nodeId,
+			label: nodeOptionLabel(node),
 		})),
 	];
 	if (!hasCurrentNodeOption && currentNodeId) {
+		var fallbackLabel = currentNodeId.startsWith("ssh:") ? `SSH: ${currentNodeId.slice(4)}` : `node:${currentNodeId}`;
 		nodeSelectOptions = [
 			{
 				value: currentNodeId,
-				label: switchingNode ? "Switching…" : `node:${currentNodeId}`,
+				label: switchingNode ? "Switching…" : fallbackLabel,
 			},
 			...nodeSelectOptions,
 		];

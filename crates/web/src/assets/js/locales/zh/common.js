@@ -53,6 +53,7 @@ export default {
 	header: {
 		memoryTooltip: "进程内存 · 系统可用内存",
 		settings: "设置",
+		changelog: "更新日志",
 		reportIssue: "报告问题",
 		reportIssueTitle: "报告问题",
 		themeLight: "浅色主题",

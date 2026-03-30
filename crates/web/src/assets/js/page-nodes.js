@@ -6,6 +6,8 @@ import { render } from "preact";
 import { useEffect } from "preact/hooks";
 import { onEvent } from "./events.js";
 import { sendRpc } from "./helpers.js";
+import { navigate } from "./router.js";
+import { settingsPath } from "./routes.js";
 import { ConfirmDialog, requestConfirm } from "./ui.js";
 
 // ── Signals ─────────────────────────────────────────────────
@@ -19,12 +21,43 @@ var toastId = 0;
 var generatedToken = signal(null); // { token, deviceId, command }
 var generatingToken = signal(false);
 var deviceName = signal("");
+var doctor = signal(null);
+var doctorLoading = signal(false);
+var doctorError = signal("");
+var doctorTest = signal(null);
+var doctorTestLoading = signal(false);
+var doctorPinLoading = signal(false);
 
 // ── Helpers ─────────────────────────────────────────────────
 
+function isSshTargetNode(node) {
+	return node?.platform === "ssh" || String(node?.nodeId || "").startsWith("ssh:");
+}
+
+function sshTargetValue(node) {
+	if (!node) return "";
+	if (String(node.nodeId || "").startsWith("ssh:")) {
+		return String(node.nodeId).slice(4);
+	}
+	return String(node.displayName || "")
+		.replace(/^SSH:\s*/i, "")
+		.trim();
+}
+
+function nodeDisplayLabel(node) {
+	if (!node) return "Local";
+	if (isSshTargetNode(node)) {
+		var target = sshTargetValue(node);
+		return target ? `SSH: ${target}` : node.displayName || node.nodeId;
+	}
+	return node.displayName || node.nodeId;
+}
+
 function gatewayWsUrl() {
 	var proto = location.protocol === "https:" ? "wss:" : "ws:";
-	return `${proto}//${location.host}/ws`;
+	var host = location.hostname;
+	var port = location.port;
+	return `${proto}//${host}${port ? `:${port}` : ""}/ws`;
 }
 
 async function generateToken() {
@@ -91,8 +124,118 @@ async function refreshPairedDevices() {
 	}
 }
 
+async function refreshDoctor() {
+	doctorLoading.value = true;
+	doctorError.value = "";
+	try {
+		var response = await fetch("/api/ssh/doctor");
+		if (!response.ok) {
+			throw new Error("Failed to load remote exec status");
+		}
+		doctor.value = await response.json();
+	} catch (error) {
+		doctorError.value = error.message || "Failed to load remote exec status";
+	} finally {
+		doctorLoading.value = false;
+	}
+}
+
+async function testActiveSshRoute() {
+	doctorTestLoading.value = true;
+	doctorError.value = "";
+	try {
+		var response = await fetch("/api/ssh/doctor/test-active", { method: "POST" });
+		var data = await response.json();
+		if (!response.ok) {
+			throw new Error(data?.error || "Failed to test SSH route");
+		}
+		doctorTest.value = data;
+		showToast(
+			data.reachable ? "Active SSH route is reachable" : data.failure_hint || "Active SSH route check failed",
+			data.reachable ? "success" : "error",
+		);
+	} catch (error) {
+		doctorError.value = error.message || "Failed to test SSH route";
+		showToast(doctorError.value, "error");
+	} finally {
+		doctorTestLoading.value = false;
+	}
+}
+
+async function repairActiveRouteHostPin() {
+	var snapshot = doctor.value;
+	var activeRoute = snapshot?.active_route || null;
+	if (!activeRoute?.target_id) {
+		showToast("The active SSH route cannot be managed from the doctor panel", "error");
+		return;
+	}
+
+	doctorPinLoading.value = true;
+	doctorError.value = "";
+	try {
+		var scanResponse = await fetch("/api/ssh/host-key/scan", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				target: activeRoute.target,
+				port: activeRoute.port ?? null,
+			}),
+		});
+		var scanData = await scanResponse.json();
+		if (!scanResponse.ok) {
+			throw new Error(scanData?.error || "Failed to scan SSH host key");
+		}
+
+		var pinResponse = await fetch(`/api/ssh/targets/${activeRoute.target_id}/pin`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ known_host: scanData.known_host }),
+		});
+		var pinData = await pinResponse.json();
+		if (!pinResponse.ok) {
+			throw new Error(pinData?.error || "Failed to pin SSH host key");
+		}
+
+		await refreshDoctor();
+		showToast(activeRoute.host_pinned ? "Active SSH host pin refreshed" : "Active SSH host pinned", "success");
+	} catch (error) {
+		doctorError.value = error.message || "Failed to repair SSH host pin";
+		showToast(doctorError.value, "error");
+	} finally {
+		doctorPinLoading.value = false;
+	}
+}
+
+async function clearActiveRouteHostPin() {
+	var snapshot = doctor.value;
+	var activeRoute = snapshot?.active_route || null;
+	if (!activeRoute?.target_id) {
+		showToast("The active SSH route cannot be managed from the doctor panel", "error");
+		return;
+	}
+
+	doctorPinLoading.value = true;
+	doctorError.value = "";
+	try {
+		var response = await fetch(`/api/ssh/targets/${activeRoute.target_id}/pin`, {
+			method: "DELETE",
+		});
+		var data = await response.json();
+		if (!response.ok) {
+			throw new Error(data?.error || "Failed to clear SSH host pin");
+		}
+		await refreshDoctor();
+		showToast("Active SSH host pin cleared", "success");
+	} catch (error) {
+		doctorError.value = error.message || "Failed to clear SSH host pin";
+		showToast(doctorError.value, "error");
+	} finally {
+		doctorPinLoading.value = false;
+	}
+}
+
 async function refreshAll() {
-	await Promise.all([refreshNodes(), refreshPendingPairs(), refreshPairedDevices()]);
+	await Promise.all([refreshNodes(), refreshPendingPairs(), refreshPairedDevices(), refreshDoctor()]);
 }
 
 async function approvePair(id) {
@@ -290,8 +433,195 @@ function NodeTelemetry({ telemetry }) {
 	</div>`;
 }
 
+function DoctorBadge({ level }) {
+	var tone =
+		level === "error"
+			? "bg-red-500/15 text-red-500"
+			: level === "warn"
+				? "bg-yellow-500/15 text-yellow-500"
+				: "bg-green-500/15 text-green-500";
+	return html`<span class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded ${tone}">${level}</span>`;
+}
+
+function RemoteExecStatusCard() {
+	var snapshot = doctor.value;
+	var execHost = snapshot?.exec_host || "local";
+	var activeRoute = snapshot?.active_route || null;
+	var checkList = snapshot?.checks || [];
+	var canManageActivePin = Boolean(activeRoute?.target_id);
+
+	return html`<div class="rounded-lg border border-[var(--border)] bg-[var(--surface-alt)] p-4 flex flex-col gap-3">
+		<div class="flex items-start justify-between gap-3 flex-wrap">
+			<div>
+				<h3 class="text-sm font-medium text-[var(--text-strong)] mb-1">Remote Exec Status</h3>
+				<p class="text-xs text-[var(--text-muted)] m-0">
+					Moltis is currently configured to run commands through
+					<strong class="text-[var(--text-strong)]"> ${execHost}</strong>
+					${activeRoute ? html` using <code>${activeRoute.label}</code>` : null}.
+				</p>
+				${
+					activeRoute
+						? html`<div class="text-xs text-[var(--text-muted)] mt-1">
+							${
+								activeRoute.host_pinned
+									? "Active route is pinned to a stored host key."
+									: canManageActivePin
+										? "Active route is currently inheriting global known_hosts policy."
+										: "Active route is not directly manageable here because it comes from legacy config."
+							}
+						</div>`
+						: null
+				}
+			</div>
+			<div class="flex gap-2 flex-wrap">
+				<button
+					class="provider-btn provider-btn-secondary provider-btn-sm"
+					onClick=${refreshDoctor}
+					disabled=${doctorLoading.value}
+				>
+					${doctorLoading.value ? "Refreshing..." : "Refresh Doctor"}
+				</button>
+				${
+					execHost === "ssh" && activeRoute
+						? html`<button
+							class="provider-btn provider-btn-secondary provider-btn-sm"
+							onClick=${testActiveSshRoute}
+							disabled=${doctorTestLoading.value}
+						>
+							${doctorTestLoading.value ? "Testing..." : "Test Active SSH Route"}
+						</button>`
+						: null
+				}
+				${
+					execHost === "ssh" && activeRoute && canManageActivePin
+						? html`<button
+							class="provider-btn provider-btn-secondary provider-btn-sm"
+							onClick=${repairActiveRouteHostPin}
+							disabled=${doctorPinLoading.value}
+						>
+							${doctorPinLoading.value ? "Scanning..." : activeRoute.host_pinned ? "Refresh Active Pin" : "Pin Active Route"}
+						</button>`
+						: null
+				}
+				${
+					execHost === "ssh" && activeRoute?.host_pinned && canManageActivePin
+						? html`<button
+							class="provider-btn provider-btn-secondary provider-btn-sm"
+							onClick=${clearActiveRouteHostPin}
+							disabled=${doctorPinLoading.value}
+						>
+							${doctorPinLoading.value ? "Clearing..." : "Clear Active Pin"}
+						</button>`
+						: null
+				}
+				<button
+					class="provider-btn provider-btn-secondary provider-btn-sm"
+					onClick=${() => navigate(settingsPath("ssh"))}
+				>
+					SSH Settings
+				</button>
+			</div>
+		</div>
+
+		<div class="grid gap-2 md:grid-cols-5">
+			<div class="rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-2">
+				<div class="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Backend</div>
+				<div class="text-sm text-[var(--text-strong)] mt-1">${execHost}</div>
+			</div>
+			<div class="rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-2">
+				<div class="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Paired Nodes</div>
+				<div class="text-sm text-[var(--text-strong)] mt-1">${snapshot?.paired_node_count ?? 0}</div>
+			</div>
+			<div class="rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-2">
+				<div class="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Managed Targets</div>
+				<div class="text-sm text-[var(--text-strong)] mt-1">
+					${snapshot?.managed_target_count ?? 0}
+					${snapshot?.pinned_target_count ? html` <span class="text-xs text-[var(--text-muted)]">(${snapshot.pinned_target_count} pinned)</span>` : null}
+				</div>
+			</div>
+			<div class="rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-2">
+				<div class="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Managed Keys</div>
+				<div class="text-sm text-[var(--text-strong)] mt-1">
+					${snapshot?.managed_key_count ?? 0}
+					${snapshot?.encrypted_key_count ? html` <span class="text-xs text-[var(--text-muted)]">(${snapshot.encrypted_key_count} encrypted)</span>` : null}
+				</div>
+			</div>
+		</div>
+
+		${doctorError.value ? html`<div class="text-xs text-red-500">${doctorError.value}</div>` : null}
+
+		${
+			doctorTest.value
+				? html`<div class="rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-xs">
+					<div class="font-medium text-[var(--text-strong)]">
+						${doctorTest.value.route_label || "Active SSH route"}
+					</div>
+					<div class="${doctorTest.value.reachable ? "text-green-500" : "text-red-500"} mt-1">
+						${doctorTest.value.reachable ? "Reachable" : "Unreachable"}${doctorTest.value.exit_code != null ? ` (exit ${doctorTest.value.exit_code})` : ""}
+					</div>
+					${
+						doctorTest.value.failure_hint
+							? html`<div class="mt-1 text-[11px] text-[var(--text-muted)]">
+								Hint: ${doctorTest.value.failure_hint}
+							</div>`
+							: null
+					}
+					${
+						doctorTest.value.stderr
+							? html`<pre class="mt-2 whitespace-pre-wrap break-all text-[11px] text-[var(--text-muted)]">${doctorTest.value.stderr}</pre>`
+							: null
+					}
+				</div>`
+				: null
+		}
+
+		<div class="flex flex-col gap-2">
+			${checkList.map(
+				(check) => html`<div class="rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-2">
+					<div class="flex items-center gap-2 flex-wrap">
+						<div class="text-sm text-[var(--text-strong)]">${check.title}</div>
+						<${DoctorBadge} level=${check.level} />
+					</div>
+					<div class="text-xs text-[var(--text-muted)] mt-1">${check.message}</div>
+					${check.hint ? html`<div class="text-xs text-[var(--text-muted)] mt-1">Hint: ${check.hint}</div>` : null}
+				</div>`,
+			)}
+		</div>
+	</div>`;
+}
+
+function SshTargetCard({ node }) {
+	var target = sshTargetValue(node) || "configured target";
+	return html`<div
+		class="flex items-start gap-3 p-3 rounded-lg bg-[var(--surface-alt)] border border-[var(--border)]"
+	>
+		<div class="w-2 h-2 rounded-full bg-sky-500 shrink-0 mt-1" title="Configured SSH target"></div>
+		<div class="flex-1 min-w-0">
+			<div class="flex items-center gap-2 flex-wrap">
+				<div class="text-sm font-medium text-[var(--text-strong)] truncate">${nodeDisplayLabel(node)}</div>
+				<span class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-500">
+					ssh
+				</span>
+				<span class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-[var(--bg)] text-[var(--text-muted)] border border-[var(--border)]">
+					configured
+				</span>
+			</div>
+			<div class="text-xs text-[var(--text-muted)] mt-1">
+				<code>${target}</code>
+			</div>
+			<p class="text-xs text-[var(--text-muted)] mt-2 mb-0">
+				Uses your local OpenSSH configuration for remote exec. This is an execution route, not a paired
+				WebSocket node, so telemetry and presence are not available here.
+			</p>
+		</div>
+	</div>`;
+}
+
 function ConnectedNodesList() {
-	if (nodes.value.length === 0) {
+	var sshTargets = nodes.value.filter(isSshTargetNode);
+	var connectedNodes = nodes.value.filter((node) => !isSshTargetNode(node));
+
+	if (connectedNodes.length === 0 && sshTargets.length === 0) {
 		return html`<div class="flex flex-col gap-4">
 			<div class="text-sm text-[var(--text-muted)] py-4 text-center">
 				<p>No nodes connected.</p>
@@ -301,32 +631,45 @@ function ConnectedNodesList() {
 	}
 
 	return html`<div class="flex flex-col gap-2">
-		${nodes.value.map(
-			(n) =>
-				html`<div
-					key=${n.nodeId}
-					class="flex items-center gap-3 p-3 rounded-lg bg-[var(--surface-alt)] border border-[var(--border)]"
-				>
-					<div class="w-2 h-2 rounded-full bg-green-500 shrink-0" title="Connected"></div>
-					<div class="flex-1 min-w-0">
-						<div class="text-sm font-medium text-[var(--text-strong)] truncate">
-							${n.displayName || n.nodeId}
-						</div>
-						<div class="text-xs text-[var(--text-muted)]">
-							${n.platform || "unknown"} · v${n.version || "?"}
-							${n.remoteIp ? html` · ${n.remoteIp}` : null}
-						</div>
-						${
-							n.capabilities?.length
-								? html`<div class="text-xs text-[var(--text-muted)] mt-1">
-									caps: ${n.capabilities.join(", ")}
-								</div>`
-								: null
-						}
-						<${NodeTelemetry} telemetry=${n.telemetry} />
-					</div>
-				</div>`,
-		)}
+		${
+			sshTargets.length > 0 &&
+			html`<div class="flex flex-col gap-2">
+				<div class="text-xs uppercase tracking-wide text-[var(--text-muted)]">Configured SSH Targets</div>
+				${sshTargets.map((node) => html`<${SshTargetCard} key=${node.nodeId} node=${node} />`)}
+			</div>`
+		}
+		${
+			connectedNodes.length > 0 &&
+			html`<div class="flex flex-col gap-2">
+				<div class="text-xs uppercase tracking-wide text-[var(--text-muted)]">Connected Paired Nodes</div>
+				${connectedNodes.map(
+					(n) =>
+						html`<div
+							key=${n.nodeId}
+							class="flex items-center gap-3 p-3 rounded-lg bg-[var(--surface-alt)] border border-[var(--border)]"
+						>
+							<div class="w-2 h-2 rounded-full bg-green-500 shrink-0" title="Connected"></div>
+							<div class="flex-1 min-w-0">
+								<div class="text-sm font-medium text-[var(--text-strong)] truncate">
+									${nodeDisplayLabel(n)}
+								</div>
+								<div class="text-xs text-[var(--text-muted)]">
+									${n.platform || "unknown"} · v${n.version || "?"}
+									${n.remoteIp ? html` · ${n.remoteIp}` : null}
+								</div>
+								${
+									n.capabilities?.length
+										? html`<div class="text-xs text-[var(--text-muted)] mt-1">
+											caps: ${n.capabilities.join(", ")}
+										</div>`
+										: null
+								}
+								<${NodeTelemetry} telemetry=${n.telemetry} />
+							</div>
+						</div>`,
+				)}
+			</div>`
+		}
 	</div>`;
 }
 
@@ -482,11 +825,14 @@ function NodesPage() {
 					</button>
 				</div>
 				<p class="text-xs text-[var(--muted)] leading-relaxed" style="margin:0;">
-					Nodes are remote devices — servers, laptops, phones — that extend your
-					gateway. Each node reports its capabilities and resources, and the agent
-					can choose where to run commands based on available capacity.
+					Nodes are remote execution targets. Paired nodes stream telemetry and
+					capabilities back to the gateway, while configured SSH targets route
+					commands through your local OpenSSH setup. The agent can choose where to
+					run commands based on what is available.
 				</p>
 			</div>
+
+			<${RemoteExecStatusCard} />
 
 			<${TabBar} />
 

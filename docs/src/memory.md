@@ -180,6 +180,9 @@ decides certain information is worth persisting.
 }
 ```
 
+Successful writes also return a `checkpointId`, so the change can be rolled
+back with `checkpoint_restore`.
+
 **Parameters:**
 
 | Parameter | Type | Default | Description |

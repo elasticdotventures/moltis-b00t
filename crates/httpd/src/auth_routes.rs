@@ -13,15 +13,14 @@ use {
     axum_extra::extract::Host,
 };
 
-use crate::{
-    auth::CredentialStore,
-    auth_middleware::{AuthResult, AuthSession, SESSION_COOKIE, check_auth},
-    auth_webauthn::WebAuthnRegistry,
-    server::is_local_connection,
-    state::GatewayState,
+use moltis_gateway::{
+    auth::CredentialStore, auth_webauthn::SharedWebAuthnRegistry, state::GatewayState,
 };
 
-pub type SharedWebAuthnRegistry = Arc<tokio::sync::RwLock<WebAuthnRegistry>>;
+use crate::{
+    auth_middleware::{AuthResult, AuthSession, SESSION_COOKIE, check_auth},
+    server::is_local_connection,
+};
 
 /// Auth-related application state.
 #[derive(Clone)]
@@ -247,12 +246,18 @@ async fn setup_handler(
     state.gateway_state.inner.write().await.setup_code = None;
     match state.credential_store.create_session().await {
         Ok(token) => {
+            let bp = state.gateway_state.behind_proxy;
+            let secure = state.gateway_state.is_secure();
             #[cfg(feature = "vault")]
             if let Some(rk) = vault_recovery_key {
-                let domain_attr =
-                    localhost_cookie_domain(&headers, state.gateway_state.behind_proxy);
+                let domain_attr = localhost_cookie_domain(&headers, bp);
+                let secure_attr = if secure {
+                    "; Secure"
+                } else {
+                    ""
+                };
                 let cookie = format!(
-                    "{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000{domain_attr}"
+                    "{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000{domain_attr}{secure_attr}"
                 );
                 return (
                     StatusCode::OK,
@@ -261,7 +266,7 @@ async fn setup_handler(
                 )
                     .into_response();
             }
-            session_response(token, &headers, state.gateway_state.behind_proxy)
+            session_response(token, &headers, bp, secure)
         },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -299,7 +304,10 @@ async fn login_handler(
                 }
             }
             match state.credential_store.create_session().await {
-                Ok(token) => session_response(token, &headers, state.gateway_state.behind_proxy),
+                Ok(token) => {
+                    let bp = state.gateway_state.behind_proxy;
+                    session_response(token, &headers, bp, state.gateway_state.is_secure())
+                },
                 Err(e) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("session error: {e}"),
@@ -325,7 +333,8 @@ async fn logout_handler(
     if let Some(token) = extract_session_token(&headers) {
         let _ = state.credential_store.delete_session(token).await;
     }
-    clear_session_response(&headers, state.gateway_state.behind_proxy)
+    let bp = state.gateway_state.behind_proxy;
+    clear_session_response(&headers, bp, state.gateway_state.is_secure())
 }
 
 // ── Reset all auth (requires session) ─────────────────────────────────────────
@@ -342,10 +351,11 @@ async fn reset_auth_handler(
                 .gateway_state
                 .disconnect_all_clients("auth_reset")
                 .await;
-            let code = generate_setup_code();
+            let code = moltis_gateway::auth::generate_setup_code();
             tracing::info!("setup code: {code} (enter this in the browser to set your password)");
             state.gateway_state.inner.write().await.setup_code = Some(secrecy::Secret::new(code));
-            clear_session_response(&headers, state.gateway_state.behind_proxy)
+            let bp = state.gateway_state.behind_proxy;
+            clear_session_response(&headers, bp, state.gateway_state.tls_active || bp)
         },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -485,7 +495,7 @@ async fn create_api_key_handler(
     // Validate scopes if provided
     if let Some(ref scopes) = body.scopes {
         for scope in scopes {
-            if !crate::auth::VALID_SCOPES.contains(&scope.as_str()) {
+            if !moltis_gateway::auth::VALID_SCOPES.contains(&scope.as_str()) {
                 return (StatusCode::BAD_REQUEST, format!("invalid scope: {scope}"))
                     .into_response();
             }
@@ -570,12 +580,6 @@ async fn rename_passkey_handler(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Generate a random 6-digit numeric setup code.
-pub fn generate_setup_code() -> String {
-    use rand::Rng;
-    rand::rng().random_range(100_000..1_000_000).to_string()
-}
-
 /// Build a session cookie string, adding `Domain=localhost` when the request
 /// arrived on a `.localhost` subdomain (e.g. `moltis.localhost`) so the cookie
 /// is shared across all loopback names per RFC 6761.
@@ -583,10 +587,16 @@ fn session_response(
     token: String,
     headers: &axum::http::HeaderMap,
     behind_proxy: bool,
+    secure: bool,
 ) -> axum::response::Response {
     let domain_attr = localhost_cookie_domain(headers, behind_proxy);
+    let secure_attr = if secure {
+        "; Secure"
+    } else {
+        ""
+    };
     let cookie = format!(
-        "{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000{domain_attr}"
+        "{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000{domain_attr}{secure_attr}"
     );
     (
         StatusCode::OK,
@@ -599,10 +609,17 @@ fn session_response(
 fn clear_session_response(
     headers: &axum::http::HeaderMap,
     behind_proxy: bool,
+    secure: bool,
 ) -> axum::response::Response {
     let domain_attr = localhost_cookie_domain(headers, behind_proxy);
-    let cookie =
-        format!("{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{domain_attr}");
+    let secure_attr = if secure {
+        "; Secure"
+    } else {
+        ""
+    };
+    let cookie = format!(
+        "{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{domain_attr}{secure_attr}"
+    );
     (
         StatusCode::OK,
         [(axum::http::header::SET_COOKIE, cookie)],
@@ -673,7 +690,7 @@ async fn passkey_register_begin_handler(
             .into_response();
     };
 
-    let existing = crate::auth_webauthn::load_passkeys(&state.credential_store)
+    let existing = moltis_gateway::auth_webauthn::load_passkeys(&state.credential_store)
         .await
         .unwrap_or_default();
 
@@ -761,7 +778,8 @@ async fn passkey_auth_begin_handler(
             .into_response();
     };
 
-    let passkeys = match crate::auth_webauthn::load_passkeys(&state.credential_store).await {
+    let passkeys = match moltis_gateway::auth_webauthn::load_passkeys(&state.credential_store).await
+    {
         Ok(pks) => pks,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
@@ -801,7 +819,10 @@ async fn passkey_auth_finish_handler(
 
     match wa.finish_authentication(&body.challenge_id, &body.credential) {
         Ok(_result) => match state.credential_store.create_session().await {
-            Ok(token) => session_response(token, &headers, state.gateway_state.behind_proxy),
+            Ok(token) => {
+                let bp = state.gateway_state.behind_proxy;
+                session_response(token, &headers, bp, state.gateway_state.tls_active || bp)
+            },
             Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         },
         Err(e) => (StatusCode::UNAUTHORIZED, e.to_string()).into_response(),
@@ -845,7 +866,7 @@ async fn setup_passkey_register_begin_handler(
             .into_response();
     };
 
-    let existing = crate::auth_webauthn::load_passkeys(&state.credential_store)
+    let existing = moltis_gateway::auth_webauthn::load_passkeys(&state.credential_store)
         .await
         .unwrap_or_default();
 
@@ -943,7 +964,10 @@ async fn setup_passkey_register_finish_handler(
         .await;
     state.gateway_state.inner.write().await.setup_code = None;
     match state.credential_store.create_session().await {
-        Ok(token) => session_response(token, &headers, state.gateway_state.behind_proxy),
+        Ok(token) => {
+            let bp = state.gateway_state.behind_proxy;
+            session_response(token, &headers, bp, state.gateway_state.tls_active || bp)
+        },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("failed to create session: {e}"),
@@ -957,7 +981,7 @@ async fn setup_passkey_register_finish_handler(
 async fn host_to_webauthn(
     host: &str,
     registry: &SharedWebAuthnRegistry,
-) -> Option<Arc<crate::auth_webauthn::WebAuthnState>> {
+) -> Option<Arc<moltis_gateway::auth_webauthn::WebAuthnState>> {
     registry.read().await.get_for_host(host)
 }
 
@@ -1035,7 +1059,7 @@ async fn vault_recovery_handler(
     }
 }
 
-/// Migrate unencrypted env vars to encrypted after vault unseal.
+/// Migrate plaintext secrets to encrypted storage after vault unseal.
 #[cfg(feature = "vault")]
 async fn run_vault_env_migration(state: &AuthState) {
     if let Some(vault) = state.credential_store.vault() {
@@ -1047,6 +1071,15 @@ async fn run_vault_env_migration(state: &AuthState) {
             Ok(_) => {},
             Err(e) => {
                 tracing::warn!(error = %e, "env var migration failed");
+            },
+        }
+        match moltis_vault::migration::migrate_ssh_keys(vault, pool).await {
+            Ok(n) if n > 0 => {
+                tracing::info!(count = n, "migrated ssh keys to encrypted");
+            },
+            Ok(_) => {},
+            Err(e) => {
+                tracing::warn!(error = %e, "ssh key migration failed");
             },
         }
     }
@@ -1131,7 +1164,7 @@ mod tests {
     #[test]
     fn session_response_includes_domain_for_localhost() {
         let h = headers_with_host("moltis.localhost:8080");
-        let resp = session_response("test-token".into(), &h, false);
+        let resp = session_response("test-token".into(), &h, false, false);
         let cookie = resp
             .headers()
             .get(axum::http::header::SET_COOKIE)
@@ -1143,12 +1176,16 @@ mod tests {
             "cookie should include Domain=localhost for .localhost host, got: {cookie}"
         );
         assert!(cookie.contains("moltis_session=test-token"));
+        assert!(
+            !cookie.contains("; Secure"),
+            "cookie should NOT include Secure when not using TLS, got: {cookie}"
+        );
     }
 
     #[test]
     fn session_response_omits_domain_for_external_host() {
         let h = headers_with_host("example.com:443");
-        let resp = session_response("test-token".into(), &h, false);
+        let resp = session_response("test-token".into(), &h, false, false);
         let cookie = resp
             .headers()
             .get(axum::http::header::SET_COOKIE)
@@ -1162,9 +1199,42 @@ mod tests {
     }
 
     #[test]
+    fn session_response_includes_secure_when_tls_active() {
+        let h = headers_with_host("localhost:8443");
+        let resp = session_response("test-token".into(), &h, false, true);
+        let cookie = resp
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .expect("login response must set a session cookie")
+            .to_str()
+            .expect("cookie header must be valid UTF-8");
+        assert!(
+            cookie.contains("; Secure"),
+            "cookie should include Secure when TLS is active, got: {cookie}"
+        );
+    }
+
+    #[test]
+    fn clear_session_response_includes_secure_when_tls_active() {
+        let h = headers_with_host("localhost:8443");
+        let resp = clear_session_response(&h, false, true);
+        let cookie = resp
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .expect("clear response must set a session cookie")
+            .to_str()
+            .expect("cookie header must be valid UTF-8");
+        assert!(
+            cookie.contains("; Secure"),
+            "clear cookie should include Secure when TLS is active, got: {cookie}"
+        );
+        assert!(cookie.contains("Max-Age=0"));
+    }
+
+    #[test]
     fn clear_session_response_includes_domain_for_localhost() {
         let h = headers_with_host("localhost:18080");
-        let resp = clear_session_response(&h, false);
+        let resp = clear_session_response(&h, false, false);
         let cookie = resp
             .headers()
             .get(axum::http::header::SET_COOKIE)
@@ -1181,7 +1251,7 @@ mod tests {
     #[test]
     fn session_response_proxy_mode_omits_localhost_domain_without_forwarded_host() {
         let h = headers_with_host("localhost:13131");
-        let resp = session_response("test-token".into(), &h, true);
+        let resp = session_response("test-token".into(), &h, true, true);
         let cookie = resp
             .headers()
             .get(axum::http::header::SET_COOKIE)
@@ -1191,6 +1261,10 @@ mod tests {
         assert!(
             !cookie.contains("Domain="),
             "cookie should omit Domain in proxy mode when only upstream localhost host is visible, got: {cookie}"
+        );
+        assert!(
+            cookie.contains("; Secure"),
+            "cookie should include Secure in proxy mode (proxy implies TLS), got: {cookie}"
         );
     }
 }

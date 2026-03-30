@@ -409,9 +409,10 @@ impl SqliteSessionMetadata {
                 channel_type TEXT    NOT NULL,
                 account_id   TEXT    NOT NULL,
                 chat_id      TEXT    NOT NULL,
+                thread_id    TEXT    NOT NULL DEFAULT '',
                 session_key  TEXT    NOT NULL,
                 updated_at   INTEGER NOT NULL,
-                PRIMARY KEY (channel_type, account_id, chat_id)
+                PRIMARY KEY (channel_type, account_id, chat_id, thread_id)
             )"#,
         )
         .execute(pool)
@@ -773,13 +774,16 @@ impl SqliteSessionMetadata {
         channel_type: &str,
         account_id: &str,
         chat_id: &str,
+        thread_id: Option<&str>,
     ) -> Option<String> {
+        let tid = thread_id.unwrap_or("");
         sqlx::query_scalar::<_, String>(
-            "SELECT session_key FROM channel_sessions WHERE channel_type = ? AND account_id = ? AND chat_id = ?",
+            "SELECT session_key FROM channel_sessions WHERE channel_type = ? AND account_id = ? AND chat_id = ? AND thread_id = ?",
         )
         .bind(channel_type)
         .bind(account_id)
         .bind(chat_id)
+        .bind(tid)
         .fetch_optional(&self.pool)
         .await
         .ok()
@@ -792,19 +796,22 @@ impl SqliteSessionMetadata {
         channel_type: &str,
         account_id: &str,
         chat_id: &str,
+        thread_id: Option<&str>,
         session_key: &str,
     ) {
         let now = now_ms() as i64;
+        let tid = thread_id.unwrap_or("");
         sqlx::query(
-            r#"INSERT INTO channel_sessions (channel_type, account_id, chat_id, session_key, updated_at)
-               VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(channel_type, account_id, chat_id) DO UPDATE SET
+            r#"INSERT INTO channel_sessions (channel_type, account_id, chat_id, thread_id, session_key, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(channel_type, account_id, chat_id, thread_id) DO UPDATE SET
                  session_key = excluded.session_key,
                  updated_at = excluded.updated_at"#,
         )
         .bind(channel_type)
         .bind(account_id)
         .bind(chat_id)
+        .bind(tid)
         .bind(session_key)
         .bind(now)
         .execute(&self.pool)
@@ -1278,26 +1285,26 @@ mod tests {
 
         // No active session initially.
         assert!(
-            meta.get_active_session("telegram", "bot1", "123")
+            meta.get_active_session("telegram", "bot1", "123", None)
                 .await
                 .is_none()
         );
 
         // Set and get.
-        meta.set_active_session("telegram", "bot1", "123", "session:abc")
+        meta.set_active_session("telegram", "bot1", "123", None, "session:abc")
             .await;
         assert_eq!(
-            meta.get_active_session("telegram", "bot1", "123")
+            meta.get_active_session("telegram", "bot1", "123", None)
                 .await
                 .as_deref(),
             Some("session:abc")
         );
 
         // Overwrite.
-        meta.set_active_session("telegram", "bot1", "123", "session:def")
+        meta.set_active_session("telegram", "bot1", "123", None, "session:def")
             .await;
         assert_eq!(
-            meta.get_active_session("telegram", "bot1", "123")
+            meta.get_active_session("telegram", "bot1", "123", None)
                 .await
                 .as_deref(),
             Some("session:def")
@@ -1305,9 +1312,26 @@ mod tests {
 
         // Different chat_id is independent.
         assert!(
-            meta.get_active_session("telegram", "bot1", "456")
+            meta.get_active_session("telegram", "bot1", "456", None)
                 .await
                 .is_none()
+        );
+
+        // Thread ID isolates sessions within the same chat.
+        meta.set_active_session("telegram", "bot1", "123", Some("42"), "session:topic")
+            .await;
+        assert_eq!(
+            meta.get_active_session("telegram", "bot1", "123", Some("42"))
+                .await
+                .as_deref(),
+            Some("session:topic")
+        );
+        // Original chat without thread_id still has its own session.
+        assert_eq!(
+            meta.get_active_session("telegram", "bot1", "123", None)
+                .await
+                .as_deref(),
+            Some("session:def")
         );
     }
 

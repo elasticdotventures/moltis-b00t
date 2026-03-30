@@ -57,9 +57,9 @@ startup. It uses trait-driven architecture with 22+ provider implementations
 and 9+ channel integrations. Memory is backed by SQLite with hybrid vector +
 FTS search. The focus is on minimal footprint and broad platform support.
 
-### Moltis — Auditable Rust gateway
+### Moltis — Auditable persistent agent server
 
-Moltis prioritizes auditability and defense in depth. The core agent engine
+Moltis prioritizes auditability, durable agent workflows, and defense in depth. The core agent engine
 (runner + provider model) is ~5K lines; the core (excluding the optional web UI)
 is ~196K lines across 46 modular crates, each independently auditable. Key
 differences from ZeroClaw:
@@ -68,6 +68,8 @@ differences from ZeroClaw:
   automation, web UI, and MCP support
 - **Apple Container support** in addition to Docker
 - **WebAuthn passkey authentication** — not just tokens
+- **Cross-session recall tools** for finding earlier work without dumping raw history
+- **Automatic checkpoints** before built-in skill and memory mutations
 - **15 lifecycle hook events** with circuit breaker and dry-run mode
 - **Built-in web UI** with real-time streaming, settings management, and
   session branching
@@ -114,6 +116,7 @@ startup, and broad channel support without a web UI.
 
 **Choose Moltis if** you want:
 - A single auditable Rust binary with built-in web UI
+- A persistent agent with cross-session recall and restoreable built-in edits
 - Voice I/O with 15+ providers (8 TTS + 7 STT)
 - MCP server support (stdio + HTTP/SSE)
 - WebAuthn passkey authentication

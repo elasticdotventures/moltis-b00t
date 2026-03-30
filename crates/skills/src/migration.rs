@@ -134,6 +134,9 @@ mod tests {
                 installed_at_ms: 1000,
                 commit_sha: Some("abc123def456".into()),
                 format: PluginFormat::ClaudeCode,
+                quarantined: false,
+                quarantine_reason: None,
+                provenance: None,
                 skills: vec![SkillState {
                     name: "pr-review-toolkit:code-reviewer".into(),
                     relative_path: "anthropics-claude-plugins-official".into(),
@@ -200,6 +203,9 @@ mod tests {
             installed_at_ms: 500,
             commit_sha: None,
             format: PluginFormat::ClaudeCode,
+            quarantined: false,
+            quarantine_reason: None,
+            provenance: None,
             skills: vec![SkillState {
                 name: "plugin:skill".into(),
                 relative_path: "owner-repo".into(),

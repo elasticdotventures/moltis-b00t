@@ -5,8 +5,9 @@ use {
         config_view::ChannelConfigView,
         gating::{DmPolicy, GroupPolicy, MentionMode},
     },
-    secrecy::{ExposeSecret, Secret},
-    serde::{Deserialize, Serialize},
+    moltis_common::secret_serde,
+    secrecy::Secret,
+    serde::{Deserialize, Serialize, ser::SerializeStruct},
 };
 
 /// Per-channel model/provider override.
@@ -43,7 +44,7 @@ pub enum StreamMode {
 #[serde(default)]
 pub struct TelegramAccountConfig {
     /// Bot token from @BotFather.
-    #[serde(serialize_with = "serialize_secret")]
+    #[serde(serialize_with = "secret_serde::serialize_secret")]
     pub token: Secret<String>,
 
     /// DM access policy.
@@ -117,11 +118,45 @@ impl std::fmt::Debug for TelegramAccountConfig {
     }
 }
 
-fn serialize_secret<S: serde::Serializer>(
-    secret: &Secret<String>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(secret.expose_secret())
+/// Wrapper that serializes secret fields as `"[REDACTED]"` for API responses.
+pub struct RedactedConfig<'a>(pub &'a TelegramAccountConfig);
+
+impl Serialize for RedactedConfig<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let c = self.0;
+        let mut count = 13; // always-present fields
+        count += c.model.is_some() as usize;
+        count += c.model_provider.is_some() as usize;
+        count += !c.channel_overrides.is_empty() as usize;
+        count += !c.user_overrides.is_empty() as usize;
+        let mut s = serializer.serialize_struct("TelegramAccountConfig", count)?;
+        s.serialize_field("token", secret_serde::REDACTED)?;
+        s.serialize_field("dm_policy", &c.dm_policy)?;
+        s.serialize_field("group_policy", &c.group_policy)?;
+        s.serialize_field("mention_mode", &c.mention_mode)?;
+        s.serialize_field("allowlist", &c.allowlist)?;
+        s.serialize_field("group_allowlist", &c.group_allowlist)?;
+        s.serialize_field("stream_mode", &c.stream_mode)?;
+        s.serialize_field("edit_throttle_ms", &c.edit_throttle_ms)?;
+        s.serialize_field("stream_notify_on_complete", &c.stream_notify_on_complete)?;
+        s.serialize_field("stream_min_initial_chars", &c.stream_min_initial_chars)?;
+        if c.model.is_some() {
+            s.serialize_field("model", &c.model)?;
+        }
+        if c.model_provider.is_some() {
+            s.serialize_field("model_provider", &c.model_provider)?;
+        }
+        s.serialize_field("otp_self_approval", &c.otp_self_approval)?;
+        s.serialize_field("otp_cooldown_secs", &c.otp_cooldown_secs)?;
+        s.serialize_field("reply_to_message", &c.reply_to_message)?;
+        if !c.channel_overrides.is_empty() {
+            s.serialize_field("channel_overrides", &c.channel_overrides)?;
+        }
+        if !c.user_overrides.is_empty() {
+            s.serialize_field("user_overrides", &c.user_overrides)?;
+        }
+        s.end()
+    }
 }
 
 impl ChannelConfigView for TelegramAccountConfig {
@@ -201,6 +236,8 @@ impl Default for TelegramAccountConfig {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
+    use secrecy::ExposeSecret;
+
     use super::*;
 
     #[test]
@@ -289,6 +326,26 @@ mod tests {
         let cfg2: TelegramAccountConfig = serde_json::from_value(value).unwrap();
         assert_eq!(cfg2.channel_model("-100123"), Some("gpt-4"));
         assert_eq!(cfg2.user_model("456"), Some("claude-sonnet"));
+    }
+
+    #[test]
+    fn redacted_hides_token() {
+        let cfg = TelegramAccountConfig {
+            token: Secret::new("123:ABC".into()),
+            model: Some("gpt-4o".into()),
+            ..Default::default()
+        };
+        let redacted = serde_json::to_value(RedactedConfig(&cfg)).unwrap();
+        assert_eq!(redacted["token"], "[REDACTED]");
+        assert_eq!(redacted["model"], "gpt-4o");
+        assert_eq!(
+            redacted["stream_mode"],
+            serde_json::to_value(&cfg.stream_mode).unwrap()
+        );
+
+        // Storage path still exposes the token
+        let storage = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(storage["token"], "123:ABC");
     }
 
     #[test]

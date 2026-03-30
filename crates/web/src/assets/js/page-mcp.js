@@ -12,6 +12,10 @@ import { ConfirmDialog, requestConfirm } from "./ui.js";
 // ── Signals ─────────────────────────────────────────────────
 var servers = signal([]);
 var loading = signal(false);
+var configLoading = signal(false);
+var configSaving = signal(false);
+var requestTimeoutSecs = signal("30");
+var configDirty = signal(false);
 var toasts = signal([]);
 var toastId = 0;
 
@@ -38,6 +42,44 @@ async function refreshServers() {
 	}
 	loading.value = false;
 	updateNavCount("mcp", servers.value.filter((s) => s.state === "running").length);
+}
+
+async function refreshConfig() {
+	configLoading.value = true;
+	try {
+		var res = await sendRpc("mcp.config.get", {});
+		if (res?.ok && res.payload) {
+			requestTimeoutSecs.value = String(res.payload.request_timeout_secs || 30);
+			configDirty.value = false;
+		}
+	} finally {
+		configLoading.value = false;
+	}
+}
+
+async function saveConfig() {
+	var timeout = normalizeOptionalTimeout(requestTimeoutSecs.value);
+	if (!timeout.ok || timeout.value === null) {
+		showToast("MCP request timeout must be a positive number of seconds", "error");
+		return;
+	}
+
+	configSaving.value = true;
+	try {
+		var res = await sendRpc("mcp.config.update", {
+			request_timeout_secs: timeout.value,
+		});
+		if (res?.ok) {
+			requestTimeoutSecs.value = String(res.payload?.request_timeout_secs || timeout.value);
+			configDirty.value = false;
+			showToast("Saved MCP settings. Restart affected MCP servers to apply the new timeout.", "success");
+		} else {
+			var msg = res?.error?.message || res?.error || "unknown error";
+			showToast(`Failed to save MCP settings: ${msg}`, "error");
+		}
+	} finally {
+		configSaving.value = false;
+	}
 }
 
 async function addServer(payload) {
@@ -172,6 +214,37 @@ function buildStdioEditPayload(editCmdText, editArgsText, editEnvText) {
 	};
 }
 
+function normalizeOptionalTimeout(rawValue) {
+	var trimmed = String(rawValue || "").trim();
+	if (!trimmed) return { ok: true, value: null };
+	if (!/^\d+$/.test(trimmed)) {
+		return { ok: false, message: "Timeout override must be a positive number of seconds" };
+	}
+	var parsed = Number.parseInt(trimmed, 10);
+	if (!Number.isFinite(parsed) || parsed <= 0) {
+		return { ok: false, message: "Timeout override must be a positive number of seconds" };
+	}
+	return { ok: true, value: parsed };
+}
+
+function getTimeoutOverrideOrNotify(rawValue) {
+	var timeoutOverride = normalizeOptionalTimeout(rawValue);
+	if (!timeoutOverride.ok) {
+		showToast(timeoutOverride.message, "error");
+		return null;
+	}
+	return timeoutOverride.value;
+}
+
+function resolveTimeoutOrAbort(rawValue, setBusy) {
+	var timeoutOverride = getTimeoutOverrideOrNotify(rawValue);
+	if (timeoutOverride === null && String(rawValue || "").trim()) {
+		setBusy(false);
+		return { ok: false };
+	}
+	return { ok: true, value: timeoutOverride };
+}
+
 // ── Featured MCP servers ────────────────────────────────────
 var featuredServers = [
 	{
@@ -245,7 +318,18 @@ function authStateLabel(state) {
 	return "OAuth not required";
 }
 
-function ConfigForm({ server, argsVal, envVal, urlVal, headerVal, onCancel }) {
+/** Render server name with optional technical ID badge */
+function renderServerName({ server }) {
+	var displayName = server.display_name || server.name;
+	var showTechnical = server.display_name && server.display_name !== server.name;
+	if (showTechnical) {
+		return html`<span class="text-sm font-medium text-[var(--text-strong)]">${displayName}</span>
+			<span class="text-[0.62rem] px-1.5 py-px rounded-full bg-[var(--surface2)] text-[var(--muted)] font-mono">${server.name}</span>`;
+	}
+	return html`<span class="text-sm font-medium text-[var(--text-strong)]">${displayName}</span>`;
+}
+
+function ConfigForm({ server, argsVal, envVal, urlVal, headerVal, timeoutVal, onCancel }) {
 	var isSse = server.transport === "sse";
 	return html`<div class="mt-2 flex flex-col gap-1.5">
 	    ${server.hint && html`<div class="text-xs text-[var(--warn)]">${server.hint}</div>`}
@@ -295,6 +379,15 @@ function ConfigForm({ server, argsVal, envVal, urlVal, headerVal, onCancel }) {
           class="provider-key-input w-full resize-y" />
       </div>`
 			}
+	    <div class="project-edit-group">
+	      <div class="text-xs text-[var(--muted)] mb-1">Timeout override (seconds, optional)</div>
+	      <input type="number" min="1" step="1" value=${timeoutVal.value}
+	        placeholder="Use global default"
+	        onInput=${(e) => {
+						timeoutVal.value = e.target.value;
+					}}
+	        class="provider-key-input w-full" />
+	    </div>
     <button onClick=${onCancel}
       class="self-start provider-btn provider-btn-secondary provider-btn-sm">Cancel</button>
   </div>`;
@@ -315,9 +408,19 @@ function FeaturedCard(props) {
 	var envVal = useSignal((f.envKeys || []).map((k) => `${k}=`).join("\n"));
 	var urlVal = useSignal(f.url || "");
 	var headerVal = useSignal("");
+	var timeoutVal = useSignal("");
 
 	var needsConfig = Boolean(f.requiresConfig || (f.envKeys && f.envKeys.length > 0) || f.transport === "sse");
 	var isSse = f.transport === "sse";
+
+	async function addConfiguredFeaturedServer(payload) {
+		try {
+			await addServer(payload);
+			configuring.value = false;
+		} finally {
+			installing.value = false;
+		}
+	}
 
 	function onAdd() {
 		if (needsConfig && !configuring.value) {
@@ -325,6 +428,11 @@ function FeaturedCard(props) {
 			return;
 		}
 		installing.value = true;
+		var timeoutResult = resolveTimeoutOrAbort(timeoutVal.value, (next) => {
+			installing.value = next;
+		});
+		if (!timeoutResult.ok) return;
+
 		if (isSse) {
 			var url = (urlVal.value || "").trim();
 			if (!url) {
@@ -332,30 +440,25 @@ function FeaturedCard(props) {
 				installing.value = false;
 				return;
 			}
-			var headers = parseEnvLines(headerVal.value);
-			addServer({
+			addConfiguredFeaturedServer({
+				headers: parseEnvLines(headerVal.value),
 				name: f.name,
 				command: "",
 				args: [],
-				headers,
 				transport: "sse",
 				url,
-			}).then(() => {
-				installing.value = false;
-				configuring.value = false;
+				request_timeout_secs: timeoutResult.value,
 			});
 			return;
 		}
 		var argsList = argsVal.value.split(/\s+/).filter(Boolean);
 		var env = parseEnvLines(envVal.value);
-		addServer({
+		addConfiguredFeaturedServer({
 			name: f.name,
 			command: f.command,
 			args: argsList,
 			env,
-		}).then(() => {
-			installing.value = false;
-			configuring.value = false;
+			request_timeout_secs: timeoutResult.value,
 		});
 	}
 
@@ -377,7 +480,7 @@ function FeaturedCard(props) {
     ${
 			configuring.value &&
 			html`<div class="px-3 pb-3 border border-t-0 border-[var(--border)] rounded-b-[var(--radius-sm)]">
-	        <${ConfigForm} server=${f} argsVal=${argsVal} envVal=${envVal} urlVal=${urlVal} headerVal=${headerVal} onCancel=${() => {
+	        <${ConfigForm} server=${f} argsVal=${argsVal} envVal=${envVal} urlVal=${urlVal} headerVal=${headerVal} timeoutVal=${timeoutVal} onCancel=${() => {
 						configuring.value = false;
 					}} />
 	      </div>`
@@ -450,29 +553,50 @@ function InstallBox() {
 	var transportType = useSignal("stdio");
 	var sseUrl = useSignal("");
 	var sseHeaders = useSignal("");
+	var timeoutVal = useSignal("");
+	var displayNameVal = useSignal("");
 
 	var isSse = transportType.value === "sse";
 	var canAdd = isSse ? sseUrl.value.trim().length > 0 : cmdLine.value.trim().length > 0;
 	var detectedName = isSse ? deriveSseName(sseUrl.value) : deriveNameFromCommand(cmdLine.value);
 
+	async function addCustomServer(payload, onReset) {
+		try {
+			await addServer(payload);
+			onReset();
+		} finally {
+			adding.value = false;
+		}
+	}
+
 	function onAdd() {
 		if (!canAdd) return;
 		adding.value = true;
+		var timeoutResult = resolveTimeoutOrAbort(timeoutVal.value, (next) => {
+			adding.value = next;
+		});
+		if (!timeoutResult.ok) return;
+
 		if (isSse) {
 			var sseName = detectedName || "remote";
-			var headers = parseEnvLines(sseHeaders.value);
-			addServer({
-				name: sseName,
-				command: "",
-				args: [],
-				headers,
-				transport: "sse",
-				url: sseUrl.value.trim(),
-			}).then(() => {
-				adding.value = false;
-				sseUrl.value = "";
-				sseHeaders.value = "";
-			});
+			addCustomServer(
+				{
+					name: sseName,
+					display_name: displayNameVal.value.trim() || null,
+					command: "",
+					args: [],
+					headers: parseEnvLines(sseHeaders.value),
+					transport: "sse",
+					url: sseUrl.value.trim(),
+					request_timeout_secs: timeoutResult.value,
+				},
+				() => {
+					sseUrl.value = "";
+					sseHeaders.value = "";
+					timeoutVal.value = "";
+					displayNameVal.value = "";
+				},
+			);
 			return;
 		}
 		var parts = cmdLine.value.trim().split(/\s+/).filter(Boolean);
@@ -480,16 +604,22 @@ function InstallBox() {
 		var argsList = parts.slice(1);
 		var name = detectedName || command;
 		var env = parseEnvLines(envVal.value);
-		addServer({
-			name,
-			command,
-			args: argsList,
-			env,
-		}).then(() => {
-			adding.value = false;
-			cmdLine.value = "";
-			envVal.value = "";
-		});
+		addCustomServer(
+			{
+				name,
+				display_name: displayNameVal.value.trim() || null,
+				command,
+				args: argsList,
+				env,
+				request_timeout_secs: timeoutResult.value,
+			},
+			() => {
+				cmdLine.value = "";
+				envVal.value = "";
+				timeoutVal.value = "";
+				displayNameVal.value = "";
+			},
+		);
 	}
 
 	function onKey(e) {
@@ -518,7 +648,18 @@ function InstallBox() {
 					cmdLine.value = e.target.value;
 				}}
         onKeyDown=${onKey} />
-      ${detectedName && html`<div class="text-xs text-[var(--muted)] mt-1">Name: <span class="font-mono text-[var(--text-strong)]">${detectedName}</span> <span class="opacity-60">(editable after adding)</span></div>`}
+      ${
+				detectedName &&
+				html`<div class="project-edit-group mt-2">
+        <div class="text-xs text-[var(--muted)] mb-1">Display name (optional)</div>
+        <input type="text" class="provider-key-input w-full" placeholder="${detectedName}"
+          value=${displayNameVal.value}
+          onInput=${(e) => {
+						displayNameVal.value = e.target.value;
+					}} />
+        <div class="text-xs text-[var(--muted)] mt-1">Technical ID: <span class="font-mono">${detectedName}</span></div>
+      </div>`
+			}
     </div>`
 		}
     ${
@@ -531,7 +672,18 @@ function InstallBox() {
 						sseUrl.value = e.target.value;
 					}}
 	        onKeyDown=${onKey} />
-	      ${detectedName && html`<div class="text-xs text-[var(--muted)] mt-1">Name: <span class="font-mono text-[var(--text-strong)]">${detectedName}</span></div>`}
+	      ${
+					detectedName &&
+					html`<div class="project-edit-group mt-2">
+	        <div class="text-xs text-[var(--muted)] mb-1">Display name (optional)</div>
+	        <input type="text" class="provider-key-input w-full" placeholder="${detectedName}"
+	          value=${displayNameVal.value}
+	          onInput=${(e) => {
+							displayNameVal.value = e.target.value;
+						}} />
+	        <div class="text-xs text-[var(--muted)] mt-1">Technical ID: <span class="font-mono">${detectedName}</span></div>
+	      </div>`
+				}
 	      <div class="text-xs text-[var(--muted)] mt-1">If the server requires OAuth, your browser opens for sign-in when you enable or restart it. URL query values may use <code>$NAME</code> or <code>${"{NAME}"}</code> placeholders from Settings → Environment Variables.</div>
 	    </div>
 	    <div class="project-edit-group mb-2">
@@ -557,6 +709,15 @@ function InstallBox() {
 					}} />
       </div>`
 		}
+    <div class="project-edit-group mb-2">
+      <div class="text-xs text-[var(--muted)] mb-1">Timeout override (seconds, optional)</div>
+      <input type="number" class="provider-key-input w-full font-mono" min="1" step="1" placeholder="Use global default"
+        value=${timeoutVal.value}
+        onInput=${(e) => {
+					timeoutVal.value = e.target.value;
+				}}
+        onKeyDown=${onKey} />
+    </div>
 	    <div class="flex gap-2 items-center">
 	      <button class="provider-btn" onClick=${onAdd} disabled=${adding.value || !canAdd}>
 	        ${adding.value ? "Adding\u2026" : "Add"}
@@ -586,7 +747,9 @@ function ServerCard({ server }) {
 	var editEnv = useSignal("");
 	var editUrl = useSignal("");
 	var editHeaders = useSignal("");
+	var editDisplayName = useSignal("");
 	var clearHeaders = useSignal(false);
+	var editTimeout = useSignal("");
 	var saving = useSignal(false);
 	var reauthing = useSignal(false);
 	var isSse = (server.transport || "stdio") === "sse";
@@ -675,12 +838,18 @@ function ServerCard({ server }) {
 		editUrl.value = "";
 		editHeaders.value = "";
 		clearHeaders.value = false;
+		editTimeout.value = server.request_timeout_secs == null ? "" : String(server.request_timeout_secs);
+		editDisplayName.value = server.display_name || "";
 		editing.value = true;
 	}
 
-	async function saveEdit() {
-		saving.value = true;
+	function buildEditPayload() {
 		var transport = editTransport.value === "sse" ? "sse" : "stdio";
+		var timeoutResult = resolveTimeoutOrAbort(editTimeout.value, (next) => {
+			saving.value = next;
+		});
+		if (!timeoutResult.ok) return null;
+
 		var editResult =
 			transport === "sse"
 				? buildSseEditPayload(server, editUrl.value, editHeaders.value, clearHeaders.value)
@@ -688,23 +857,35 @@ function ServerCard({ server }) {
 		if (editResult.error) {
 			showToast(editResult.error, "error");
 			saving.value = false;
-			return;
+			return null;
 		}
-		var payload = {
+
+		return {
 			name: server.name,
 			transport,
+			request_timeout_secs: timeoutResult.value,
 			...editResult.payload,
+			display_name: editDisplayName.value.trim() || null,
 		};
-		var res = await sendRpc("mcp.update", payload);
-		if (res?.ok) {
-			showToast(`Updated "${server.name}"`, "success");
-			editing.value = false;
-		} else {
-			var msg = res?.error?.message || res?.error || "unknown error";
-			showToast(`Failed to update: ${msg}`, "error");
+	}
+
+	async function saveEdit() {
+		saving.value = true;
+		try {
+			var payload = buildEditPayload();
+			if (!payload) return;
+			var res = await sendRpc("mcp.update", payload);
+			if (res?.ok) {
+				showToast(`Updated "${server.name}"`, "success");
+				editing.value = false;
+			} else {
+				var msg = res?.error?.message || res?.error || "unknown error";
+				showToast(`Failed to update: ${msg}`, "error");
+			}
+			await refreshServers();
+		} finally {
+			saving.value = false;
 		}
-		saving.value = false;
-		await refreshServers();
 	}
 
 	function remove(e) {
@@ -725,9 +906,10 @@ function ServerCard({ server }) {
       <div class="flex items-center gap-2">
         <span class="text-[0.65rem] text-[var(--muted)] transition-transform duration-150 ${expanded.value ? "rotate-90" : ""}">\u25B6</span>
         <${StatusBadge} state=${server.state} />
-        <span class="font-mono text-sm font-medium text-[var(--text-strong)]">${server.name}</span>
+        <${renderServerName} server=${server} />
         <span class="text-[0.62rem] px-1.5 py-px rounded-full bg-[var(--surface2)] text-[var(--muted)] font-medium">${server.state || "stopped"}</span>
         <span class="text-[0.62rem] px-1.5 py-px rounded-full bg-[var(--surface2)] text-[var(--muted)] font-medium">${transportLabel(server.transport)}</span>
+        <span class="text-[0.62rem] px-1.5 py-px rounded-full bg-[var(--surface2)] text-[var(--muted)] font-medium">timeout ${server.configured_request_timeout_secs}s</span>
         <span class="text-xs text-[var(--muted)]">${server.tool_count} tool${server.tool_count !== 1 ? "s" : ""}${server.state === "running" && server.tool_count > 0 ? ` · ~${server.tool_count * 300} tokens` : ""}</span>
       </div>
       <div class="flex items-center gap-1.5">
@@ -768,6 +950,15 @@ function ServerCard({ server }) {
 	              class="provider-btn provider-btn-sm ${editTransport.value === "sse" ? "" : "provider-btn-secondary"}">SSE (remote)</button>
 	          </div>
 	        </div>
+        ${html`<div class="project-edit-group mb-2">
+		  <div class="text-xs text-[var(--muted)] mb-1">Display name (optional)</div>
+		  <input type="text" class="provider-key-input w-full" value=${editDisplayName.value}
+		    placeholder=${server.display_name || server.name}
+		    onInput=${(e) => {
+					editDisplayName.value = e.target.value;
+				}} />
+		  <div class="text-xs text-[var(--muted)] mt-1">Technical ID: <span class="font-mono">${server.name}</span></div>
+		</div>`}
 	        ${
 						editTransport.value === "sse" &&
 						html`<div class="project-edit-group mb-2">
@@ -828,6 +1019,14 @@ function ServerCard({ server }) {
         </div>
         </div>`
 					}
+        <div class="project-edit-group mb-2">
+          <div class="text-xs text-[var(--muted)] mb-1">Timeout override (seconds, optional)</div>
+          <input type="number" class="provider-key-input w-full font-mono" min="1" step="1" placeholder="Use global default"
+            value=${editTimeout.value}
+            onInput=${(e) => {
+							editTimeout.value = e.target.value;
+						}} />
+        </div>
         <div class="flex gap-2">
           <button class="provider-btn" onClick=${saveEdit} disabled=${saving.value}>
             ${saving.value ? "Saving\u2026" : "Save"}
@@ -864,10 +1063,30 @@ function ServerCard({ server }) {
 	          class="provider-btn provider-btn-secondary provider-btn-sm">${reauthing.value ? "\u2026" : "Connect OAuth"}</button>
 	      </div>`
 				}
+	      <div class="flex items-center gap-1.5 py-1.5 text-xs text-[var(--muted)]">
+	        <span class="opacity-60">TIMEOUT</span>
+	        <span class="text-[var(--text)]">
+	          ${
+							server.request_timeout_secs == null
+								? `${server.configured_request_timeout_secs}s (global default)`
+								: `${server.request_timeout_secs}s override`
+						}
+	        </span>
+	      </div>
 	    </div>`
 					: html`<div class="flex items-center gap-1.5 py-1.5 text-xs text-[var(--muted)]">
         <span class="opacity-60">$</span>
         <code class="font-mono text-[var(--text)]">${server.command} ${(server.args || []).join(" ")}</code>
+      </div>
+      <div class="flex items-center gap-1.5 py-1.5 text-xs text-[var(--muted)]">
+        <span class="opacity-60">TIMEOUT</span>
+        <span class="text-[var(--text)]">
+          ${
+						server.request_timeout_secs == null
+							? `${server.configured_request_timeout_secs}s (global default)`
+							: `${server.request_timeout_secs}s override`
+					}
+        </span>
       </div>`
 			}
       ${!tools.value && html`<div class="text-[var(--muted)] text-sm py-2">Loading tools\u2026</div>`}
@@ -904,9 +1123,50 @@ function ConfiguredServersSection() {
   </div>`;
 }
 
+function ConfigSection() {
+	return html`<div class="max-w-[600px] bg-[var(--surface2)] border border-[var(--border)] rounded-[var(--radius)] px-5 py-4">
+    <div class="flex items-center justify-between gap-3 mb-2">
+      <h3 class="text-sm font-medium text-[var(--text-strong)]">Request Timeout</h3>
+      <button
+        class="provider-btn provider-btn-secondary provider-btn-sm"
+        onClick=${refreshConfig}
+        disabled=${configLoading.value || configSaving.value}
+      >${configLoading.value ? "Loading\u2026" : "Reload"}</button>
+    </div>
+    <p class="text-xs text-[var(--muted)] mb-3">
+      Controls how long Moltis waits for an MCP server response before failing the request. This applies to both local stdio servers and remote SSE servers.
+    </p>
+    <div class="flex flex-wrap items-end gap-3">
+      <label class="flex flex-col gap-1">
+        <span class="text-xs text-[var(--muted)]">Timeout (seconds)</span>
+        <input
+          type="number"
+          min="1"
+          step="1"
+          value=${requestTimeoutSecs.value}
+          onInput=${(e) => {
+						requestTimeoutSecs.value = e.target.value;
+						configDirty.value = true;
+					}}
+          class="provider-key-input w-[140px]"
+        />
+      </label>
+      <button
+        class="provider-btn provider-btn-sm"
+        onClick=${saveConfig}
+        disabled=${configSaving.value || configLoading.value || !configDirty.value}
+      >${configSaving.value ? "Saving\u2026" : "Save"}</button>
+    </div>
+    <div class="text-xs text-[var(--muted)] mt-3">
+      Saving updates <code>mcp.request_timeout_secs</code> in your config file. Existing MCP connections keep using the old timeout until those servers are restarted.
+    </div>
+  </div>`;
+}
+
 function McpPage() {
 	useEffect(() => {
 		refreshServers();
+		refreshConfig();
 		// Listen for health status broadcasts from the server.
 		var off = onEvent("mcp.status", (payload) => {
 			if (Array.isArray(payload)) {
@@ -946,6 +1206,7 @@ function McpPage() {
 	        <div class="mt-1">Remote SSE servers can receive your tool inputs and act in linked external systems. Use trusted hosts and only scopes you intend to grant.</div>
 	        <div class="mt-1">Each enabled server also adds tool definitions to chat context and consumes tokens, enable only what you actively need.</div>
 	      </div>
+      <${ConfigSection} />
       <${InstallBox} />
       <${FeaturedSection} />
       <${ConfiguredServersSection} />

@@ -13,7 +13,7 @@ The prompt is built in `crates/agents/src/prompt.rs` by
 2. **Agent identity** — name, emoji, creature, vibe from `IDENTITY.md`
 3. **Soul** — personality directives from `SOUL.md` (or built-in default)
 4. **User profile** — user's name from `USER.md`
-5. **Project context** — `CLAUDE.md` / `CLAUDE.local.md` / `.claude/rules/*.md`
+5. **Project context** — `CLAUDE.md` / `CLAUDE.local.md` / `AGENTS.md` / `.cursorrules` / `.claude/rules/*.md` / `.cursor/rules/*.{md,mdc}`
    walked up the directory tree
 6. **Runtime context** — host info, sandbox config, execution routing hints
 7. **Skills listing** — available skills as XML block
@@ -107,8 +107,11 @@ from the project directory upward to the filesystem root, collecting:
 
 - `CLAUDE.md`
 - `CLAUDE.local.md`
-- `.claude/rules/*.md`
 - `AGENTS.md`
+- `.cursorrules`
+- `.claude/rules/*.md`
+- `.cursor/rules/*.md`
+- `.cursor/rules/*.mdc`
 
 Files are merged outermost-first (root before project directory), so
 project-specific instructions override workspace-level ones.
@@ -167,6 +170,19 @@ Optional markdown files from the data directory (`~/.moltis/`):
 
 Each is rendered under `## Workspace Files` with its own `###` subheading.
 Leading HTML comments (`<!-- ... -->`) are stripped before injection.
+
+### Project Context Safety
+
+Project context ingestion now performs a lightweight safety pass before prompt
+injection:
+
+- leading HTML comments are stripped
+- suspicious instruction-override phrases are flagged
+- obvious prompt/secret exfiltration text is flagged
+- obvious approval/sandbox bypass text is flagged
+
+Warnings are surfaced in the rendered project context so the model sees that
+the file should be treated cautiously instead of as operator intent.
 
 ### Tool Schemas
 
@@ -228,6 +244,9 @@ concern.
 
 <project>/
 ├── CLAUDE.md            # Project instructions
+├── AGENTS.md            # Project-local agent instructions
+├── .cursorrules         # Cursor compatibility file
+├── .cursor/rules/*.mdc  # Cursor rule files
 ├── CLAUDE.local.md      # Local overrides (gitignored)
 └── .claude/rules/*.md   # Additional rule files
 ```

@@ -158,13 +158,26 @@ command_exists() {
 }
 
 get_latest_version() {
+    # Extract tag_name, stripping optional leading "v" prefix.
     if command_exists curl; then
-        curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/'
+        curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/'
     elif command_exists wget; then
-        wget -qO- "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/'
+        wget -qO- "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/'
     else
         error "Neither curl nor wget found. Please install one of them."
     fi
+}
+
+# Return the GitHub release tag for a given version.
+# Date-based versions (YYYYMMDD.NN) are bare tags; semver gets a "v" prefix.
+release_tag() {
+    v="$1"
+    case "$v" in
+        [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].*)
+            echo "$v" ;;
+        *)
+            echo "v$v" ;;
+    esac
 }
 
 download() {
@@ -281,8 +294,9 @@ install_binary() {
             ;;
     esac
 
+    tag=$(release_tag "$version")
     tarball="${BINARY_NAME}-${version}-${target}.tar.gz"
-    url="https://github.com/${GITHUB_REPO}/releases/download/v${version}/${tarball}"
+    url="https://github.com/${GITHUB_REPO}/releases/download/${tag}/${tarball}"
     checksum_url="${url}.sha256"
 
     info "Downloading ${BINARY_NAME} v${version} for ${target}..."
@@ -328,9 +342,10 @@ install_deb() {
         *) error "Unsupported architecture for .deb: $arch" ;;
     esac
 
-    # Package naming: moltis_VERSION-REV_ARCH.deb
-    deb_file="moltis_${version}-1_${deb_arch}.deb"
-    url="https://github.com/${GITHUB_REPO}/releases/download/v${version}/${deb_file}"
+    # Package naming: moltis_VERSION_ARCH.deb (cargo-deb with --deb-version, no revision)
+    tag=$(release_tag "$version")
+    deb_file="moltis_${version}_${deb_arch}.deb"
+    url="https://github.com/${GITHUB_REPO}/releases/download/${tag}/${deb_file}"
 
     info "Downloading ${deb_file}..."
 
@@ -356,8 +371,9 @@ install_rpm() {
     esac
 
     # Package naming: moltis-VERSION-1.ARCH.rpm
+    tag=$(release_tag "$version")
     rpm_file="moltis-${version}-1.${rpm_arch}.rpm"
-    url="https://github.com/${GITHUB_REPO}/releases/download/v${version}/${rpm_file}"
+    url="https://github.com/${GITHUB_REPO}/releases/download/${tag}/${rpm_file}"
 
     info "Downloading ${rpm_file}..."
 
@@ -382,8 +398,9 @@ install_arch() {
     arch="$1"
     version="$2"
 
+    tag=$(release_tag "$version")
     pkg_file="moltis-${version}-1-${arch}.pkg.tar.zst"
-    url="https://github.com/${GITHUB_REPO}/releases/download/v${version}/${pkg_file}"
+    url="https://github.com/${GITHUB_REPO}/releases/download/${tag}/${pkg_file}"
 
     info "Downloading ${pkg_file}..."
 
@@ -434,7 +451,8 @@ install_from_source() {
     trap 'rm -rf "$tmpdir"' EXIT
 
     info "Cloning repository..."
-    git clone --depth 1 --branch "v${version}" "https://github.com/${GITHUB_REPO}.git" "$tmpdir/moltis"
+    tag=$(release_tag "$version")
+    git clone --depth 1 --branch "$tag" "https://github.com/${GITHUB_REPO}.git" "$tmpdir/moltis"
 
     cd "$tmpdir/moltis"
 

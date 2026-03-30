@@ -1,4 +1,4 @@
-use std::{fmt::Write, sync::Arc};
+use std::{borrow::Cow, fmt::Write, sync::Arc};
 
 use {
     anyhow::{Result, bail},
@@ -37,14 +37,44 @@ fn resolve_agent_max_iterations(configured: usize) -> usize {
     configured
 }
 
-/// Sanitize a tool name from model output: trim whitespace and strip
-/// surrounding quotes that some models wrap around tool names.
-fn sanitize_tool_name(name: &str) -> &str {
+/// Sanitize a tool name from model output.
+///
+/// Handles quirks from various LLM providers:
+/// 1. Trims whitespace
+/// 2. Strips surrounding double quotes (some models quote tool names)
+/// 3. Strips `functions_` prefix (OpenAI legacy artifact from some models)
+/// 4. Strips trailing `_\d+` suffix (parallel-call indexing from some models,
+///    e.g. Kimi K2.5 via OpenRouter sends `exec_2`, `browser_4`)
+fn sanitize_tool_name(name: &str) -> Cow<'_, str> {
     let trimmed = name.trim();
-    trimmed
+    let unquoted = trimmed
         .strip_prefix('"')
         .and_then(|s| s.strip_suffix('"'))
-        .unwrap_or(trimmed)
+        .unwrap_or(trimmed);
+
+    // Strip `functions_` prefix (OpenAI legacy artifact from some models).
+    // INVARIANT: no registered tool name starts with "functions_".
+    let without_prefix = unquoted.strip_prefix("functions_").unwrap_or(unquoted);
+
+    // Strip trailing `_\d+` suffix (parallel-call indexing from some models).
+    // INVARIANT: no registered tool name ends with `_\d+` (a purely numeric segment after the last underscore).
+    let cleaned = without_prefix
+        .rfind('_')
+        .and_then(|pos| {
+            let suffix = &without_prefix[pos + 1..];
+            if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) && pos > 0 {
+                Some(&without_prefix[..pos])
+            } else {
+                None
+            }
+        })
+        .unwrap_or(without_prefix);
+
+    if cleaned == name {
+        Cow::Borrowed(name)
+    } else {
+        Cow::Owned(cleaned.to_string())
+    }
 }
 
 const MALFORMED_TOOL_RETRY_PROMPT: &str = "Your tool call was malformed. Retry with exact format:\n\
@@ -654,15 +684,20 @@ pub async fn run_agent_loop_with_context(
     let native_tools = provider.supports_tools();
     let config = moltis_config::discover_and_load();
     let max_tool_result_bytes = config.tools.max_tool_result_bytes;
-    let max_iterations = resolve_agent_max_iterations(config.tools.agent_max_iterations);
-    let tool_schemas = tools.list_schemas();
+    let base_max_iterations = resolve_agent_max_iterations(config.tools.agent_max_iterations);
+    // Lazy mode needs extra iterations for tool_search discovery round-trips.
+    let max_iterations = if config.tools.registry_mode == moltis_config::ToolRegistryMode::Lazy {
+        base_max_iterations * 3
+    } else {
+        base_max_iterations
+    };
 
     let is_multimodal = matches!(user_content, UserContent::Multimodal(_));
     info!(
         provider = provider.name(),
         model = provider.id(),
         native_tools,
-        tools_count = tool_schemas.len(),
+        tools_count = tools.list_names().len(),
         is_multimodal,
         "starting agent loop"
     );
@@ -678,13 +713,6 @@ pub async fn run_agent_loop_with_context(
         content: user_content.clone(),
     });
     let explicit_shell_command = explicit_shell_command_from_user_content(user_content);
-
-    // Only send tool schemas to providers that support them natively.
-    let schemas_for_api = if native_tools {
-        &tool_schemas
-    } else {
-        &vec![]
-    };
 
     // Extract session key once for hook payloads.
     let session_key_for_hooks = tool_context
@@ -713,6 +741,14 @@ pub async fn run_agent_loop_with_context(
                 "agent loop exceeded max iterations"
             )));
         }
+
+        // Re-compute schemas each iteration so activated tools appear immediately.
+        let tool_schemas = tools.list_schemas();
+        let schemas_for_api = if native_tools {
+            &tool_schemas
+        } else {
+            &vec![]
+        };
 
         if let Some(cb) = on_event {
             cb(RunnerEvent::Iteration(iterations));
@@ -1015,13 +1051,17 @@ pub async fn run_agent_loop_with_context(
             .tool_calls
             .iter()
             .map(|tc| {
-                let tool = tools.get(sanitize_tool_name(&tc.name));
+                let sanitized = sanitize_tool_name(&tc.name);
+                if *sanitized != tc.name {
+                    debug!(original = %tc.name, sanitized = %sanitized, "sanitized mangled tool name");
+                }
+                let tool = tools.get(&sanitized);
                 let mut args = tc.arguments.clone();
 
                 // Dispatch BeforeToolCall hook — may block or modify arguments.
                 let hook_registry = hook_registry.clone();
                 let session_key = session_key_for_hooks.clone();
-                let tc_name = tc.name.clone();
+                let tc_name = sanitized.to_string();
                 let _tc_id = tc.id.clone();
 
                 if let Some(ref ctx) = tool_context
@@ -1195,15 +1235,20 @@ pub async fn run_agent_loop_streaming(
     let native_tools = provider.supports_tools();
     let config = moltis_config::discover_and_load();
     let max_tool_result_bytes = config.tools.max_tool_result_bytes;
-    let max_iterations = resolve_agent_max_iterations(config.tools.agent_max_iterations);
-    let tool_schemas = tools.list_schemas();
+    let base_max_iterations = resolve_agent_max_iterations(config.tools.agent_max_iterations);
+    // Lazy mode needs extra iterations for tool_search discovery round-trips.
+    let max_iterations = if config.tools.registry_mode == moltis_config::ToolRegistryMode::Lazy {
+        base_max_iterations * 3
+    } else {
+        base_max_iterations
+    };
 
     let is_multimodal = matches!(user_content, UserContent::Multimodal(_));
     info!(
         provider = provider.name(),
         model = provider.id(),
         native_tools,
-        tools_count = tool_schemas.len(),
+        tools_count = tools.list_names().len(),
         is_multimodal,
         "starting streaming agent loop"
     );
@@ -1219,20 +1264,6 @@ pub async fn run_agent_loop_streaming(
         content: user_content.clone(),
     });
     let explicit_shell_command = explicit_shell_command_from_user_content(user_content);
-
-    // Only send tool schemas to providers that support them natively.
-    let schemas_for_api = if native_tools {
-        tool_schemas.clone()
-    } else {
-        vec![]
-    };
-
-    info!(
-        native_tools,
-        schemas_for_api_count = schemas_for_api.len(),
-        tool_schemas_count = tool_schemas.len(),
-        "schemas_for_api prepared for streaming"
-    );
 
     // Extract session key once for hook payloads.
     let session_key_for_hooks = tool_context
@@ -1268,6 +1299,13 @@ pub async fn run_agent_loop_streaming(
                 "agent loop exceeded max iterations"
             )));
         }
+
+        // Re-compute schemas each iteration so activated tools appear immediately.
+        let schemas_for_api = if native_tools {
+            tools.list_schemas()
+        } else {
+            vec![]
+        };
 
         if let Some(cb) = on_event {
             cb(RunnerEvent::Iteration(iterations));
@@ -1698,12 +1736,16 @@ pub async fn run_agent_loop_streaming(
         let tool_futures: Vec<_> = tool_calls
             .iter()
             .map(|tc| {
-                let tool = tools.get(sanitize_tool_name(&tc.name));
+                let sanitized = sanitize_tool_name(&tc.name);
+                if *sanitized != tc.name {
+                    debug!(original = %tc.name, sanitized = %sanitized, "sanitized mangled tool name");
+                }
+                let tool = tools.get(&sanitized);
                 let mut args = tc.arguments.clone();
 
                 let hook_registry = hook_registry.clone();
                 let session_key = session_key_for_hooks.clone();
-                let tc_name = tc.name.clone();
+                let tc_name = sanitized.to_string();
 
                 if let Some(ref ctx) = tool_context
                     && let (Some(args_obj), Some(ctx_obj)) = (args.as_object_mut(), ctx.as_object())
@@ -6136,5 +6178,58 @@ mod tests {
     fn sanitize_tool_name_single_quotes_not_stripped() {
         // Only double quotes are stripped.
         assert_eq!(sanitize_tool_name("'exec'"), "'exec'");
+    }
+
+    // ── parallel-call suffix stripping ──────────────────────────────────
+
+    #[test]
+    fn sanitize_tool_name_strips_numeric_suffix() {
+        assert_eq!(sanitize_tool_name("exec_2"), "exec");
+        assert_eq!(sanitize_tool_name("browser_4"), "browser");
+        assert_eq!(sanitize_tool_name("exec_123"), "exec");
+    }
+
+    #[test]
+    fn sanitize_tool_name_strips_functions_prefix() {
+        assert_eq!(sanitize_tool_name("functions_spawn_agent"), "spawn_agent");
+        assert_eq!(sanitize_tool_name("functions_exec"), "exec");
+    }
+
+    #[test]
+    fn sanitize_tool_name_strips_prefix_and_suffix() {
+        assert_eq!(sanitize_tool_name("functions_spawn_agent_6"), "spawn_agent");
+        assert_eq!(sanitize_tool_name("functions_exec_2"), "exec");
+    }
+
+    #[test]
+    fn sanitize_tool_name_preserves_legitimate_underscores() {
+        // Real tool names with underscores must survive.
+        assert_eq!(sanitize_tool_name("web_search"), "web_search");
+        assert_eq!(sanitize_tool_name("memory_save"), "memory_save");
+        assert_eq!(sanitize_tool_name("spawn_agent"), "spawn_agent");
+        assert_eq!(sanitize_tool_name("get_user_location"), "get_user_location");
+    }
+
+    #[test]
+    fn sanitize_tool_name_preserves_mcp_names() {
+        assert_eq!(
+            sanitize_tool_name("mcp__ai__find-tasks"),
+            "mcp__ai__find-tasks"
+        );
+        assert_eq!(
+            sanitize_tool_name("mcp__jmap-mcp-0-1-1__get_emails"),
+            "mcp__jmap-mcp-0-1-1__get_emails"
+        );
+        assert_eq!(
+            sanitize_tool_name("mcp-server_tool-name"),
+            "mcp-server_tool-name"
+        );
+    }
+
+    #[test]
+    fn sanitize_tool_name_functions_prefix_alone_yields_empty() {
+        // "functions_" with no trailing name should produce an empty string,
+        // which is handled by find_empty_tool_name_call / EMPTY_TOOL_NAME_RETRY_PROMPT.
+        assert_eq!(sanitize_tool_name("functions_"), "");
     }
 }

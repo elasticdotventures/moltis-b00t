@@ -28,6 +28,24 @@ test.describe("MCP page", () => {
 		expect(pageErrors).toEqual([]);
 	});
 
+	test("request timeout setting is shown", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/settings/mcp");
+
+		const requestTimeoutSection = page
+			.getByRole("heading", { name: "Request Timeout", exact: true })
+			.locator("..")
+			.locator("..");
+		const timeoutInput = requestTimeoutSection.locator('input[type="number"][min="1"]');
+		await expect(requestTimeoutSection.getByRole("heading", { name: "Request Timeout", exact: true })).toBeVisible();
+		await expect(
+			requestTimeoutSection.getByText("Controls how long Moltis waits for an MCP server response", { exact: false }),
+		).toBeVisible();
+		await expect(timeoutInput).toBeVisible();
+		expect(Number.parseInt(await timeoutInput.inputValue(), 10)).toBeGreaterThan(0);
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("custom form supports remote SSE URL flow with header guidance", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 		await navigateAndWait(page, "/settings/mcp");
@@ -37,6 +55,7 @@ test.describe("MCP page", () => {
 		await expect(page.getByPlaceholder("Authorization=Bearer ...")).toBeVisible();
 		await expect(page.getByText("Request headers (optional, KEY=VALUE per line)", { exact: true })).toBeVisible();
 		await expect(page.getByText("Stored header values stay hidden", { exact: false })).toBeVisible();
+		await expect(page.getByPlaceholder("Use global default")).toBeVisible();
 		await expect(page.getByText("If the server requires OAuth", { exact: false })).toBeVisible();
 		expect(pageErrors).toEqual([]);
 	});

@@ -311,6 +311,22 @@
   font-size: 0.78rem;
 }
 
+.skill-hint {
+  color: var(--muted);
+  font-size: 0.75rem;
+  margin-top: 4px;
+}
+
+.skill-hint a {
+  color: var(--muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.skill-hint a:hover {
+  color: var(--text);
+}
+
 .map-link-row {
   width: 100%;
   align-items: baseline;
@@ -359,7 +375,6 @@
   color: var(--text-strong);
   font-weight: 600;
 }
-
 /* ── Message inline elements ── */
 
 .msg code {

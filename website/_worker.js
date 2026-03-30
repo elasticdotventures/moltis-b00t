@@ -16,6 +16,26 @@ function detectLang(acceptLanguage) {
   return DEFAULT_LANG;
 }
 
+/** Inject shared partials (<!--NAV-->) into HTML responses. */
+async function injectPartials(response, env) {
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('text/html')) return response;
+
+  const html = await response.text();
+  if (!html.includes('<!--NAV-->')) return new Response(html, response);
+
+  // Fetch the nav partial from static assets
+  const navUrl = new URL('/_partials/nav.html', 'http://localhost');
+  const navResponse = await env.ASSETS.fetch(navUrl);
+  const navHtml = navResponse.ok ? await navResponse.text() : '';
+
+  const injected = html.replace('<!--NAV-->', navHtml);
+  return new Response(injected, {
+    status: response.status,
+    headers: response.headers,
+  });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -33,13 +53,14 @@ export default {
         url.pathname = `/index.${lang}.html`;
         const response = await env.ASSETS.fetch(url);
         if (response.ok) {
-          return response;
+          return injectPartials(response, env);
         }
       } catch (_) {
         // Fall through to default static asset serving
       }
     }
 
-    return env.ASSETS.fetch(request);
+    const response = await env.ASSETS.fetch(request);
+    return injectPartials(response, env);
   },
 };

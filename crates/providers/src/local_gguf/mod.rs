@@ -7,6 +7,7 @@
 
 pub mod chat_templates;
 pub mod models;
+pub mod runtime_devices;
 pub mod system_info;
 pub mod tool_grammar;
 
@@ -821,6 +822,7 @@ pub fn log_system_info_and_suggestions() {
         available_ram_gb = sys.available_ram_gb(),
         has_metal = sys.has_metal,
         has_cuda = sys.has_cuda,
+        has_vulkan = sys.has_vulkan,
         tier = %tier,
         "local-llm system info"
     );
@@ -882,8 +884,10 @@ mod tests {
         let sys = system_info::SystemInfo {
             total_ram_bytes: 16 * 1024 * 1024 * 1024,
             available_ram_bytes: 8 * 1024 * 1024 * 1024,
+            gguf_devices: vec![],
             has_metal: false,
             has_cuda: false,
+            has_vulkan: false,
             is_apple_silicon: false,
         };
         let tier = sys.memory_tier();
@@ -908,8 +912,10 @@ mod tests {
         let sys = system_info::SystemInfo {
             total_ram_bytes: 16 * 1024 * 1024 * 1024,
             available_ram_bytes: 8 * 1024 * 1024 * 1024,
+            gguf_devices: vec![],
             has_metal: true,
             has_cuda: false,
+            has_vulkan: false,
             is_apple_silicon: true,
         };
         let tier = sys.memory_tier();

@@ -323,6 +323,7 @@ async fn handle_message(
             account_id: state.account_id.clone(),
             chat_id: chat_id.clone(),
             message_id: Some(info.id.to_string()),
+            thread_id: None,
         };
         if let Some(ref sink) = state.event_sink {
             match sink.dispatch_command(cmd, reply_to).await {
@@ -353,6 +354,7 @@ async fn handle_message(
         account_id: state.account_id.clone(),
         chat_id: chat_id.clone(),
         message_id: Some(info.id.to_string()),
+        thread_id: None,
     };
     let meta = ChannelMessageMeta {
         channel_type: ChannelType::Whatsapp,
@@ -396,6 +398,13 @@ async fn handle_message(
             handle_location(&msg, account_id, reply_to, meta, chat_jid, state).await;
         },
         ChannelMessageKind::Other => {
+            info!(
+                account_id = %state.account_id,
+                chat = %chat_jid,
+                "unhandled WhatsApp message type — replying with error. \
+                 Message fields present: {}",
+                describe_message_fields(&msg),
+            );
             let reply_msg = wa::Message {
                 conversation: Some(
                     "Sorry, I can't understand that message type. Check logs for details.".into(),
@@ -717,6 +726,42 @@ fn is_owner_user(jid: &Jid, own_pn: Option<&Jid>, own_lid: Option<&Jid>) -> bool
         || own_lid.is_some_and(|lid| lid.is_same_user_as(jid))
 }
 
+/// List which `Option` fields on `wa::Message` are `Some`, giving operators a
+/// concrete clue about the unhandled message type (e.g. "sticker_message, reaction_message").
+///
+/// Only checks fields that are NOT already handled by `classify_message` to avoid
+/// misleading output — if a field appears here it genuinely was not dispatched.
+fn describe_message_fields(msg: &wa::Message) -> String {
+    let mut present = Vec::new();
+    macro_rules! check {
+        ($($field:ident),+ $(,)?) => {
+            $(if msg.$field.is_some() { present.push(stringify!($field)); })+
+        };
+    }
+    // Omit fields already handled by classify_message:
+    //   conversation, extended_text_message, image_message, audio_message,
+    //   video_message, document_message, location_message, live_location_message
+    check!(
+        sender_key_distribution_message,
+        contact_message,
+        call,
+        protocol_message,
+        contacts_array_message,
+        sticker_message,
+        reaction_message,
+        poll_creation_message,
+        poll_update_message,
+        interactive_message,
+        edited_message,
+        event_message,
+    );
+    if present.is_empty() {
+        "none".to_owned()
+    } else {
+        present.join(", ")
+    }
+}
+
 /// Classify the inbound message kind based on its content.
 ///
 /// Media types take priority over text — an image with a caption is still `Photo`,
@@ -948,5 +993,40 @@ mod tests {
 
         assert!(is_self_chat);
         assert!(!sender_is_owner);
+    }
+
+    #[test]
+    fn describe_message_fields_reports_present_fields() {
+        let msg = wa::Message {
+            sticker_message: Some(Default::default()),
+            reaction_message: Some(Default::default()),
+            ..Default::default()
+        };
+        let desc = describe_message_fields(&msg);
+        assert!(
+            desc.contains("sticker_message"),
+            "expected sticker_message in: {desc}"
+        );
+        assert!(
+            desc.contains("reaction_message"),
+            "expected reaction_message in: {desc}"
+        );
+    }
+
+    #[test]
+    fn describe_message_fields_empty_message_returns_none() {
+        let msg = wa::Message::default();
+        assert_eq!(describe_message_fields(&msg), "none");
+    }
+
+    #[test]
+    fn describe_message_fields_excludes_handled_types() {
+        // image_message is handled by classify_message — should NOT appear
+        let msg = wa::Message {
+            image_message: Some(Default::default()),
+            ..Default::default()
+        };
+        let desc = describe_message_fields(&msg);
+        assert_eq!(desc, "none", "handled fields should not appear: {desc}");
     }
 }

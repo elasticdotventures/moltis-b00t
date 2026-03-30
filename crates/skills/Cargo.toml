@@ -17,6 +17,7 @@ serde_yaml            = { workspace = true }
 tar                   = { workspace = true }
 tokio                 = { workspace = true }
 tracing               = { workspace = true }
+walkdir               = { workspace = true }
 
 [features]
 default      = []

@@ -22,18 +22,65 @@ pub fn validate_name(name: &str) -> bool {
         && !name.contains("::")
 }
 
+/// When `name` fails validation, try to use `slug` (from frontmatter or `_meta.json`)
+/// as the internal name, storing the original `name` as `display_name`.
+fn resolve_name_or_slug(meta: &mut SkillMetadata, skill_dir: &Path) -> anyhow::Result<()> {
+    if validate_name(&meta.name) {
+        return Ok(());
+    }
+
+    // Try slug from frontmatter first.
+    let slug = meta.slug.clone().or_else(|| {
+        // Fall back to slug from _meta.json.
+        read_meta_json(skill_dir).and_then(|m| m.slug)
+    });
+
+    match slug {
+        Some(ref s) if validate_name(s) => {
+            tracing::debug!(
+                name = %meta.name,
+                slug = %s,
+                "skill name invalid, using slug as internal name"
+            );
+            meta.display_name = Some(std::mem::take(&mut meta.name));
+            meta.name = s.clone();
+            // slug is intentionally left populated so callers can inspect what was in the frontmatter.
+            Ok(())
+        },
+        Some(ref s) => {
+            let source = if meta.slug.is_some() {
+                "frontmatter"
+            } else {
+                "_meta.json"
+            };
+            bail!(
+                "skill name '{}' is invalid and slug '{}' (from {}) is also invalid: \
+                 must be 1-64 lowercase alphanumeric, hyphen, or colon chars \
+                 (e.g. 'my-skill' or 'ns:skill')",
+                meta.name,
+                s,
+                source
+            );
+        },
+        None => {
+            bail!(
+                "skill name '{}' is invalid and no slug provided: \
+                 must be 1-64 lowercase alphanumeric, hyphen, or colon chars \
+                 (e.g. 'my-skill' or 'ns:skill'), \
+                 or provide a valid 'slug' field",
+                meta.name
+            );
+        },
+    }
+}
+
 /// Parse a SKILL.md file into metadata only (frontmatter).
 pub fn parse_metadata(content: &str, skill_dir: &Path) -> anyhow::Result<SkillMetadata> {
     let (frontmatter, _body) = split_frontmatter(content)?;
     let mut meta: SkillMetadata =
         serde_yaml::from_str(&frontmatter).context("invalid SKILL.md frontmatter")?;
 
-    if !validate_name(&meta.name) {
-        bail!(
-            "invalid skill name '{}': must be 1-64 lowercase alphanumeric/hyphen chars",
-            meta.name
-        );
-    }
+    resolve_name_or_slug(&mut meta, skill_dir)?;
 
     merge_openclaw_requires(&frontmatter, &mut meta);
     meta.path = skill_dir.to_path_buf();
@@ -46,12 +93,7 @@ pub fn parse_skill(content: &str, skill_dir: &Path) -> anyhow::Result<SkillConte
     let mut meta: SkillMetadata =
         serde_yaml::from_str(&frontmatter).context("invalid SKILL.md frontmatter")?;
 
-    if !validate_name(&meta.name) {
-        bail!(
-            "invalid skill name '{}': must be 1-64 lowercase alphanumeric/hyphen chars",
-            meta.name
-        );
-    }
+    resolve_name_or_slug(&mut meta, skill_dir)?;
 
     merge_openclaw_requires(&frontmatter, &mut meta);
     meta.path = skill_dir.to_path_buf();
@@ -308,9 +350,104 @@ When asked to commit, run `git add` then `git commit`.
     }
 
     #[test]
-    fn test_invalid_name_rejected() {
+    fn test_invalid_name_no_slug_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
         let content = "---\nname: Bad-Name\n---\nbody\n";
-        assert!(parse_metadata(content, Path::new("/tmp")).is_err());
+        let err = parse_metadata(content, tmp.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("no slug provided"),
+            "error should mention missing slug: {err}"
+        );
+    }
+
+    #[test]
+    fn test_invalid_name_with_valid_slug_uses_slug() {
+        let tmp = tempfile::tempdir().unwrap();
+        let content = r#"---
+name: "SEO (Site Audit + Content Writer + Competitor Analysis)"
+slug: seo
+description: SEO tools
+---
+
+Body.
+"#;
+        let meta = parse_metadata(content, tmp.path()).unwrap();
+        assert_eq!(meta.name, "seo");
+        assert_eq!(
+            meta.display_name.as_deref(),
+            Some("SEO (Site Audit + Content Writer + Competitor Analysis)")
+        );
+        assert_eq!(meta.description, "SEO tools");
+    }
+
+    #[test]
+    fn test_invalid_name_with_invalid_slug_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let content = "---\nname: Bad Name\nslug: Also Bad\n---\nbody\n";
+        let err = parse_metadata(content, tmp.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("also invalid"),
+            "error should mention both are invalid: {err}"
+        );
+    }
+
+    #[test]
+    fn test_valid_name_ignores_slug() {
+        let content = "---\nname: my-skill\nslug: other\ndescription: test\n---\nbody\n";
+        let meta = parse_metadata(content, Path::new("/tmp/my-skill")).unwrap();
+        assert_eq!(meta.name, "my-skill");
+        assert!(meta.display_name.is_none());
+        assert_eq!(meta.slug, Some("other".into()));
+    }
+
+    #[test]
+    fn test_parse_skill_slug_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let content = r#"---
+name: "My Fancy Skill (v2)"
+slug: fancy-skill
+description: A fancy skill
+---
+
+Do fancy things.
+"#;
+        let skill = parse_skill(content, tmp.path()).unwrap();
+        assert_eq!(skill.metadata.name, "fancy-skill");
+        assert_eq!(
+            skill.metadata.display_name.as_deref(),
+            Some("My Fancy Skill (v2)")
+        );
+        assert!(skill.body.contains("fancy things"));
+    }
+
+    #[test]
+    fn test_slug_fallback_from_meta_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("seo");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        // Write a _meta.json with slug
+        std::fs::write(
+            skill_dir.join("_meta.json"),
+            r#"{"slug": "seo", "displayName": "SEO Tools", "owner": "test"}"#,
+        )
+        .unwrap();
+
+        let content = r#"---
+name: "SEO (Audit + Writer)"
+description: SEO toolkit
+---
+
+Body.
+"#;
+        let meta = parse_metadata(content, &skill_dir).unwrap();
+        assert_eq!(meta.name, "seo");
+        assert_eq!(meta.display_name.as_deref(), Some("SEO (Audit + Writer)"));
+        // Slug came from _meta.json, not frontmatter, so meta.slug stays None.
+        assert!(
+            meta.slug.is_none(),
+            "slug comes from _meta.json, not frontmatter, so meta.slug should remain None"
+        );
     }
 
     #[test]

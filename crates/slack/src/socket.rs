@@ -275,6 +275,7 @@ async fn command_events_callback(
             account_id: account_id.to_string(),
             chat_id: event.channel_id.to_string(),
             message_id: None,
+            thread_id: None,
         };
         match sink.dispatch_command(&full_command, reply_to).await {
             Ok(response_text) => Ok(SlackCommandEventResponse::new(
@@ -338,6 +339,7 @@ async fn interaction_events_callback(
             account_id: account_id.to_string(),
             chat_id: channel_id,
             message_id: None,
+            thread_id: None,
         };
         match sink.dispatch_interaction(&action_id, reply_to).await {
             Ok(_response) => {
@@ -551,6 +553,7 @@ pub(crate) async fn handle_inbound(
             account_id: account_id.to_string(),
             chat_id: channel_id.to_string(),
             message_id: thread_ts,
+            thread_id: None,
         };
 
         let meta = ChannelMessageMeta {

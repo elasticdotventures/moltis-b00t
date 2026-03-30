@@ -3,8 +3,9 @@ use {
         config_view::ChannelConfigView,
         gating::{DmPolicy, GroupPolicy, MentionMode},
     },
-    secrecy::{ExposeSecret, Secret},
-    serde::{Deserialize, Serialize},
+    moltis_common::secret_serde,
+    secrecy::Secret,
+    serde::{Deserialize, Serialize, ser::SerializeStruct},
 };
 
 /// Configuration for a single Microsoft Teams bot account.
@@ -15,7 +16,7 @@ pub struct MsTeamsAccountConfig {
     pub app_id: String,
 
     /// Microsoft App Password (client secret).
-    #[serde(serialize_with = "serialize_secret")]
+    #[serde(serialize_with = "secret_serde::serialize_secret")]
     pub app_password: Secret<String>,
 
     /// OAuth tenant segment for Bot Framework token issuance.
@@ -43,7 +44,7 @@ pub struct MsTeamsAccountConfig {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_option_secret"
+        serialize_with = "secret_serde::serialize_option_secret"
     )]
     pub webhook_secret: Option<Secret<String>>,
 
@@ -78,20 +79,36 @@ impl std::fmt::Debug for MsTeamsAccountConfig {
     }
 }
 
-fn serialize_secret<S: serde::Serializer>(
-    secret: &Secret<String>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(secret.expose_secret())
-}
+/// Wrapper that serializes secret fields as `"[REDACTED]"` for API responses.
+pub struct RedactedConfig<'a>(pub &'a MsTeamsAccountConfig);
 
-fn serialize_option_secret<S: serde::Serializer>(
-    secret: &Option<Secret<String>>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    match secret {
-        Some(s) => serializer.serialize_some(s.expose_secret()),
-        None => serializer.serialize_none(),
+impl Serialize for RedactedConfig<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let c = self.0;
+        let mut count = 9; // always-present fields
+        count += c.webhook_secret.is_some() as usize;
+        count += c.model.is_some() as usize;
+        count += c.model_provider.is_some() as usize;
+        let mut s = serializer.serialize_struct("MsTeamsAccountConfig", count)?;
+        s.serialize_field("app_id", &c.app_id)?;
+        s.serialize_field("app_password", secret_serde::REDACTED)?;
+        s.serialize_field("oauth_tenant", &c.oauth_tenant)?;
+        s.serialize_field("oauth_scope", &c.oauth_scope)?;
+        s.serialize_field("dm_policy", &c.dm_policy)?;
+        s.serialize_field("group_policy", &c.group_policy)?;
+        s.serialize_field("mention_mode", &c.mention_mode)?;
+        s.serialize_field("allowlist", &c.allowlist)?;
+        s.serialize_field("group_allowlist", &c.group_allowlist)?;
+        if c.webhook_secret.is_some() {
+            s.serialize_field("webhook_secret", secret_serde::REDACTED)?;
+        }
+        if c.model.is_some() {
+            s.serialize_field("model", &c.model)?;
+        }
+        if c.model_provider.is_some() {
+            s.serialize_field("model_provider", &c.model_provider)?;
+        }
+        s.end()
     }
 }
 
@@ -137,5 +154,54 @@ impl Default for MsTeamsAccountConfig {
             model: None,
             model_provider: None,
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacted_hides_secrets() {
+        let cfg = MsTeamsAccountConfig {
+            app_id: "my-app-id".into(),
+            app_password: Secret::new("super-secret-pw".into()),
+            webhook_secret: Some(Secret::new("webhook-sec".into())),
+            model: Some("gpt-4o".into()),
+            ..Default::default()
+        };
+        let redacted = serde_json::to_value(RedactedConfig(&cfg)).unwrap();
+        assert_eq!(redacted["app_password"], "[REDACTED]");
+        assert_eq!(redacted["webhook_secret"], "[REDACTED]");
+        // Non-secret fields preserved
+        assert_eq!(redacted["app_id"], "my-app-id");
+        assert_eq!(redacted["model"], "gpt-4o");
+
+        // Storage path still exposes secrets
+        let storage = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(storage["app_password"], "super-secret-pw");
+        assert_eq!(storage["webhook_secret"], "webhook-sec");
+    }
+
+    #[test]
+    fn redacted_omits_none_webhook_secret() {
+        let cfg = MsTeamsAccountConfig::default();
+        let redacted = serde_json::to_value(RedactedConfig(&cfg)).unwrap();
+        assert!(redacted.get("webhook_secret").is_none());
+    }
+
+    #[test]
+    fn config_round_trip() {
+        let json = serde_json::json!({
+            "app_id": "test-id",
+            "app_password": "test-pw",
+            "dm_policy": "open",
+        });
+        let cfg: MsTeamsAccountConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(cfg.app_id, "test-id");
+        assert_eq!(cfg.dm_policy, DmPolicy::Open);
+        let value = serde_json::to_value(&cfg).unwrap();
+        let _: MsTeamsAccountConfig = serde_json::from_value(value).unwrap();
     }
 }

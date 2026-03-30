@@ -51,6 +51,19 @@ whatsapp = ["moltis-gateway/whatsapp"]
 When disabled, all WhatsApp code is compiled out — no QR code library, no
 Signal Protocol store, no WhatsApp event handlers.
 
+```admonish important title="Enable in Channel List"
+WhatsApp is not shown in the web UI by default. Add it to the offered
+channels list in `moltis.toml`:
+
+\`\`\`toml
+[channels]
+offered = ["telegram", "discord", "slack", "whatsapp"]
+\`\`\`
+
+Restart Moltis after changing this setting. The **+ Add Channel** menu
+will then include the WhatsApp option.
+```
+
 ## Quick Start (Web UI)
 
 The fastest way to connect WhatsApp:
@@ -335,6 +348,21 @@ Switch to the **Senders** tab to see everyone who has messaged the bot:
 - View pending OTP challenges with the code displayed
 
 ## Troubleshooting
+
+### WhatsApp Not in Add Channel Menu
+
+- WhatsApp is not offered by default. Add `"whatsapp"` to the `offered` list in `moltis.toml`:
+  ```toml
+  [channels]
+  offered = ["telegram", "discord", "slack", "whatsapp"]
+  ```
+- Restart Moltis after changing this setting
+
+### "Can't Understand That Message Type"
+
+- This means the bot received a message type it doesn't handle (e.g. stickers, reactions, polls)
+- Check the server logs for an `info` entry that lists which message fields were present
+- Supported types: text, images, audio, voice notes, video, documents, and locations
 
 ### QR Code Not Appearing
 

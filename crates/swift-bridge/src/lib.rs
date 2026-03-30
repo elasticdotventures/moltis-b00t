@@ -324,6 +324,7 @@ type NetworkAuditCallback = unsafe extern "C" fn(event_json: *const c_char);
 static NETWORK_AUDIT_CALLBACK: OnceLock<NetworkAuditCallback> = OnceLock::new();
 
 /// JSON-serializable network audit event sent to Swift.
+#[cfg(feature = "trusted-network")]
 #[derive(Debug, Serialize)]
 struct BridgeNetworkAuditEvent {
     domain: String,
@@ -338,6 +339,7 @@ struct BridgeNetworkAuditEvent {
 }
 
 #[allow(unsafe_code)]
+#[cfg(feature = "trusted-network")]
 fn emit_network_audit(entry: &moltis_network_filter::NetworkAuditEntry) {
     if let Some(callback) = NETWORK_AUDIT_CALLBACK.get() {
         let source = match &entry.approval_source {
@@ -1700,29 +1702,28 @@ pub extern "C" fn moltis_start_httpd(request_json: *const c_char) -> *mut c_char
         // Prepare the full gateway (config, DB migrations, service wiring,
         // background tasks). This runs on the bridge runtime via block_on —
         // valid because this is an extern "C" fn, not async.
-        let prepared =
-            match BRIDGE
-                .runtime
-                .block_on(moltis_gateway::server::prepare_gateway_embedded(
-                    &request.host,
-                    request.port,
-                    true, // no_tls — the macOS app manages its own TLS if needed
-                    None, // log_buffer
-                    request.config_dir.map(std::path::PathBuf::from),
-                    request.data_dir.map(std::path::PathBuf::from),
-                    Some(moltis_web::web_routes), // full web UI
-                    BRIDGE.session_metadata.event_bus().cloned(), // share bus with gateway
-                )) {
-                Ok(p) => p,
-                Err(e) => {
-                    emit_log(
-                        "ERROR",
-                        "bridge.httpd",
-                        &format!("Gateway init failed: {e}"),
-                    );
-                    return encode_error("gateway_init_failed", &e.to_string());
-                },
-            };
+        let prepared = match BRIDGE
+            .runtime
+            .block_on(moltis_httpd::prepare_httpd_embedded(
+                &request.host,
+                request.port,
+                true, // no_tls — the macOS app manages its own TLS if needed
+                None, // log_buffer
+                request.config_dir.map(std::path::PathBuf::from),
+                request.data_dir.map(std::path::PathBuf::from),
+                Some(moltis_web::web_routes), // full web UI
+                BRIDGE.session_metadata.event_bus().cloned(), // share bus with gateway
+            )) {
+            Ok(p) => p,
+            Err(e) => {
+                emit_log(
+                    "ERROR",
+                    "bridge.httpd",
+                    &format!("Gateway init failed: {e}"),
+                );
+                return encode_error("gateway_init_failed", &e.to_string());
+            },
+        };
 
         let gateway_state = prepared.state;
 
@@ -1745,6 +1746,7 @@ pub extern "C" fn moltis_start_httpd(request_json: *const c_char) -> *mut c_char
 
         // Subscribe to the network audit broadcast (if the proxy is active)
         // and forward entries to Swift via the registered callback.
+        #[cfg(feature = "trusted-network")]
         if let Some(ref audit_buf) = prepared.audit_buffer {
             let mut audit_rx = audit_buf.subscribe();
             BRIDGE.runtime.spawn(async move {
@@ -1761,8 +1763,15 @@ pub extern "C" fn moltis_start_httpd(request_json: *const c_char) -> *mut c_char
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let app = prepared.app;
+        // Keep the proxy shutdown sender alive for the server's full lifetime;
+        // dropping it closes the watch channel and terminates the proxy.
+        #[cfg(feature = "trusted-network")]
+        let _proxy_shutdown_tx = prepared._proxy_shutdown_tx;
 
         BRIDGE.runtime.spawn(async move {
+            // Hold the proxy sender inside the spawn so it lives as long as the server.
+            #[cfg(feature = "trusted-network")]
+            let _keep_proxy = _proxy_shutdown_tx;
             let server = axum::serve(
                 listener,
                 app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -3212,8 +3221,9 @@ pub extern "C" fn moltis_sandbox_check_packages(request_json: *const c_char) -> 
             .collect();
         let script = checks.join("\n");
 
+        let cli = moltis_tools::sandbox::container_cli();
         let output = BRIDGE.runtime.block_on(async {
-            tokio::process::Command::new("docker")
+            tokio::process::Command::new(cli)
                 .args(["run", "--rm", "--entrypoint", "sh", &base, "-c", &script])
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())

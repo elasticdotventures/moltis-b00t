@@ -8,6 +8,7 @@
 
 pub mod approval;
 pub mod branch_session;
+pub mod checkpoints;
 #[cfg(test)]
 pub mod contract;
 
@@ -52,6 +53,7 @@ pub mod cron_tool;
 #[cfg(feature = "wasm")]
 pub mod embedded_wasm;
 pub mod exec;
+pub mod file_io;
 pub mod image_cache;
 pub mod location;
 pub mod map;
@@ -60,6 +62,7 @@ pub mod policy;
 pub mod process;
 pub mod sandbox;
 pub mod sandbox_packages;
+pub mod send_document;
 pub mod send_image;
 pub mod session_state;
 pub mod sessions_communicate;

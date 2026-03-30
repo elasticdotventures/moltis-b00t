@@ -8,12 +8,40 @@ import { nodeStore } from "./stores/node-store.js";
 var nodeIdx = -1;
 var eventUnsubs = [];
 
+function isSshTargetNode(node) {
+	return node?.platform === "ssh" || String(node?.nodeId || "").startsWith("ssh:");
+}
+
+function nodeDisplayLabel(node) {
+	if (!node) return "Local";
+	if (node.displayName) return node.displayName;
+	if (isSshTargetNode(node)) {
+		var target = String(node.nodeId || "").replace(/^ssh:/, "");
+		return `SSH: ${target}`;
+	}
+	return node.nodeId;
+}
+
+function nodeMetaLabel(node) {
+	if (!node) return "";
+	return isSshTargetNode(node) ? "OpenSSH target" : node.platform;
+}
+
 function setSessionNode(sessionKey, nodeId) {
 	sendRpc("nodes.set_session", { session_key: sessionKey, node_id: nodeId || null });
 }
 
 function updateNodeComboLabel(node) {
-	if (S.nodeComboLabel) S.nodeComboLabel.textContent = node ? node.displayName || node.nodeId : "Local";
+	if (S.nodeComboLabel) {
+		S.nodeComboLabel.textContent = nodeDisplayLabel(node);
+	}
+	if (S.nodeComboBtn) {
+		S.nodeComboBtn.title = node
+			? isSshTargetNode(node)
+				? `Execution target: ${nodeDisplayLabel(node)}`
+				: `Execution target: ${nodeDisplayLabel(node)}`
+			: "Execution target: Local";
+	}
 }
 
 export function fetchNodes() {
@@ -64,7 +92,7 @@ function buildNodeItem(node, currentId) {
 
 	var label = document.createElement("span");
 	label.className = "model-item-label";
-	label.textContent = node ? node.displayName || node.nodeId : "Local";
+	label.textContent = nodeDisplayLabel(node);
 	el.appendChild(label);
 
 	if (node) {
@@ -72,7 +100,7 @@ function buildNodeItem(node, currentId) {
 		meta.className = "model-item-meta";
 		var badge = document.createElement("span");
 		badge.className = "model-item-provider";
-		badge.textContent = node.platform;
+		badge.textContent = nodeMetaLabel(node);
 		meta.appendChild(badge);
 		el.appendChild(meta);
 	}

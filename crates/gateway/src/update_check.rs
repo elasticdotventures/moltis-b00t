@@ -41,11 +41,16 @@ pub fn resolve_releases_url(configured: Option<&str>) -> String {
 ///
 /// Returns a default (no update) on any error — 404, parse failure, network
 /// issues — so callers never have to handle errors.
+/// Dev builds (no `MOLTIS_VERSION` at compile time) always return "no update".
 pub async fn fetch_update_availability(
     client: &reqwest::Client,
     releases_url: &str,
     current_version: &str,
 ) -> UpdateAvailability {
+    if moltis_config::version::IS_DEV_BUILD {
+        tracing::debug!("update check skipped: dev build");
+        return UpdateAvailability::default();
+    }
     match try_fetch_update(client, releases_url, current_version).await {
         Ok(update) => update,
         Err(e) => {

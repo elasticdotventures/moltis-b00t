@@ -22,7 +22,8 @@ use {
 };
 
 use crate::sessions_communicate::{
-    SendToSessionFn, SessionAccessPolicy, SessionsHistoryTool, SessionsListTool, SessionsSendTool,
+    SendToSessionFn, SessionAccessPolicy, SessionsHistoryTool, SessionsListTool,
+    SessionsSearchTool, SessionsSendTool,
 };
 
 /// Maximum nesting depth for sub-agents (prevents infinite recursion).
@@ -36,6 +37,7 @@ const DELEGATE_TOOLS: &[&str] = &[
     "spawn_agent",
     "sessions_list",
     "sessions_history",
+    "sessions_search",
     "sessions_send",
     "task_list",
 ];
@@ -472,6 +474,13 @@ impl AgentTool for SpawnAgentTool {
             ));
             sub_tools.replace(Box::new(
                 SessionsHistoryTool::new(
+                    Arc::clone(&deps.session_store),
+                    Arc::clone(&deps.session_metadata),
+                )
+                .with_policy(policy.clone()),
+            ));
+            sub_tools.replace(Box::new(
+                SessionsSearchTool::new(
                     Arc::clone(&deps.session_store),
                     Arc::clone(&deps.session_metadata),
                 )

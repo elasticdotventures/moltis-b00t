@@ -649,7 +649,7 @@ pub fn context_window_for_model(model_id: &str) -> u32 {
     if model_id.starts_with("kimi-") {
         return 128_000;
     }
-    // MiniMax M2/M2.1/M2.5: 204,800.
+    // MiniMax M2/M2.1/M2.5/M2.7: 204,800.
     if model_id.starts_with("MiniMax-") {
         return 204_800;
     }
@@ -853,9 +853,12 @@ const CEREBRAS_MODELS: &[(&str, &str)] =
 /// Known MiniMax models.
 /// See: <https://platform.minimax.io/docs/api-reference/text-anthropic-api>
 const MINIMAX_MODELS: &[(&str, &str)] = &[
+    ("MiniMax-M2.7", "MiniMax M2.7"),
+    ("MiniMax-M2.7-highspeed", "MiniMax M2.7 Highspeed"),
     ("MiniMax-M2.5", "MiniMax M2.5"),
     ("MiniMax-M2.5-highspeed", "MiniMax M2.5 Highspeed"),
     ("MiniMax-M2.1", "MiniMax M2.1"),
+    ("MiniMax-M2.1-highspeed", "MiniMax M2.1 Highspeed"),
     ("MiniMax-M2", "MiniMax M2"),
 ];
 
@@ -875,6 +878,35 @@ const ZAI_MODELS: &[(&str, &str)] = &[
     ("glm-4.5-flash", "GLM-4.5 Flash"),
     ("glm-4.5v", "GLM-4.5V (Vision)"),
     ("glm-4-32b-0414-128k", "GLM-4 32B 128K"),
+];
+
+/// Known Fireworks models.
+const FIREWORKS_MODELS: &[(&str, &str)] = &[
+    (
+        "accounts/fireworks/routers/kimi-k2p5-turbo",
+        "Kimi K2.5 Turbo",
+    ),
+    ("accounts/fireworks/models/deepseek-v3p2", "DeepSeek V3p2"),
+    (
+        "accounts/fireworks/models/qwen3-235b-a22b-instruct-2507",
+        "Qwen3 235B A22B Instruct",
+    ),
+    (
+        "accounts/fireworks/models/llama-v3p1-405b-instruct",
+        "Llama 3.1 405B Instruct",
+    ),
+    (
+        "accounts/fireworks/models/llama-v3p1-70b-instruct",
+        "Llama 3.1 70B Instruct",
+    ),
+    (
+        "accounts/fireworks/models/qwen3-coder-480b-a35b-instruct",
+        "Qwen3 Coder 480B A35B",
+    ),
+    (
+        "accounts/fireworks/models/kimi-k2-instruct-0905",
+        "Kimi K2 Instruct",
+    ),
 ];
 
 /// Known DeepSeek models.
@@ -981,6 +1013,16 @@ const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         local_only: false,
     },
     OpenAiCompatDef {
+        config_name: "zai-code",
+        env_key: "Z_CODE_API_KEY",
+        env_base_url_key: "Z_CODE_BASE_URL",
+        default_base_url: "https://api.z.ai/api/coding/paas/v4",
+        models: ZAI_MODELS,
+        supports_model_discovery: true,
+        requires_api_key: true,
+        local_only: false,
+    },
+    OpenAiCompatDef {
         config_name: "venice",
         env_key: "VENICE_API_KEY",
         env_base_url_key: "VENICE_BASE_URL",
@@ -996,6 +1038,16 @@ const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         env_base_url_key: "DEEPSEEK_BASE_URL",
         default_base_url: "https://api.deepseek.com",
         models: DEEPSEEK_MODELS,
+        supports_model_discovery: true,
+        requires_api_key: true,
+        local_only: false,
+    },
+    OpenAiCompatDef {
+        config_name: "fireworks",
+        env_key: "FIREWORKS_API_KEY",
+        env_base_url_key: "FIREWORKS_BASE_URL",
+        default_base_url: "https://api.fireworks.ai/inference/v1",
+        models: FIREWORKS_MODELS,
         supports_model_discovery: true,
         requires_api_key: true,
         local_only: false,
@@ -1521,7 +1573,8 @@ impl ProviderRegistry {
             let Some(base_url) = entry.base_url.as_ref().filter(|u| !u.trim().is_empty()) else {
                 continue;
             };
-            if should_fetch_models(config, name) {
+            let has_explicit_models = !configured_models_for_provider(config, name).is_empty();
+            if !has_explicit_models && should_fetch_models(config, name) {
                 pending.push((
                     name.clone(),
                     openai::start_model_discovery(api_key.clone(), base_url.clone()),
@@ -1977,6 +2030,10 @@ impl ProviderRegistry {
             // Get alias if configured (for metrics differentiation).
             let alias = config.get("anthropic").and_then(|e| e.alias.clone());
             let provider_label = alias.clone().unwrap_or_else(|| "anthropic".into());
+            let cache_retention = config
+                .get("anthropic")
+                .map(|e| e.cache_retention)
+                .unwrap_or(moltis_config::CacheRetention::Short);
             let preferred = configured_models_for_provider(config, "anthropic");
             let discovered = if should_fetch_models(config, "anthropic") {
                 ANTHROPIC_MODELS
@@ -1994,12 +2051,15 @@ impl ProviderRegistry {
                 if self.has_provider_model(&provider_label, &model_id) {
                     continue;
                 }
-                let provider = Arc::new(anthropic::AnthropicProvider::with_alias(
-                    key.clone(),
-                    model_id.clone(),
-                    base_url.clone(),
-                    alias.clone(),
-                ));
+                let provider = Arc::new(
+                    anthropic::AnthropicProvider::with_alias(
+                        key.clone(),
+                        model_id.clone(),
+                        base_url.clone(),
+                        alias.clone(),
+                    )
+                    .with_cache_retention(cache_retention),
+                );
                 self.register(
                     ModelInfo {
                         id: model_id,
@@ -2110,6 +2170,10 @@ impl ProviderRegistry {
             // Get alias if configured (for metrics differentiation).
             let alias = config.get(def.config_name).and_then(|e| e.alias.clone());
             let provider_label = alias.unwrap_or_else(|| def.config_name.into());
+            let cache_retention = config
+                .get(def.config_name)
+                .map(|e| e.cache_retention)
+                .unwrap_or(moltis_config::CacheRetention::Short);
             let stream_transport = config
                 .get(def.config_name)
                 .map(|entry| entry.stream_transport)
@@ -2201,7 +2265,8 @@ impl ProviderRegistry {
                     base_url.clone(),
                     provider_label.clone(),
                 )
-                .with_stream_transport(stream_transport);
+                .with_stream_transport(stream_transport)
+                .with_cache_retention(cache_retention);
 
                 if !matches!(effective_tool_mode, moltis_config::ToolMode::Auto) {
                     oai = oai.with_tool_mode(effective_tool_mode);
@@ -2280,6 +2345,9 @@ impl ProviderRegistry {
                     name.clone(),
                 )
                 .with_stream_transport(entry.stream_transport);
+                if !matches!(entry.wire_api, moltis_config::WireApi::ChatCompletions) {
+                    oai = oai.with_wire_api(entry.wire_api);
+                }
                 if !matches!(custom_tool_mode, moltis_config::ToolMode::Auto) {
                     oai = oai.with_tool_mode(custom_tool_mode);
                 }
@@ -3034,6 +3102,20 @@ mod tests {
     }
 
     #[test]
+    fn zai_code_registers_with_api_key() {
+        let mut config = ProvidersConfig::default();
+        config
+            .providers
+            .insert("zai-code".into(), moltis_config::schema::ProviderEntry {
+                api_key: Some(secrecy::Secret::new("sk-test-zai-code".into())),
+                ..Default::default()
+            });
+
+        let reg = ProviderRegistry::from_env_with_config(&config);
+        assert!(reg.list_models().iter().any(|m| m.provider == "zai-code"));
+    }
+
+    #[test]
     fn moonshot_registers_with_api_key() {
         let mut config = ProvidersConfig::default();
         config
@@ -3075,6 +3157,38 @@ mod tests {
         assert!(
             provider.supports_tools(),
             "deepseek models must support tool calling"
+        );
+    }
+
+    #[test]
+    fn fireworks_registers_with_api_key() {
+        let mut config = ProvidersConfig::default();
+        config
+            .providers
+            .insert("fireworks".into(), moltis_config::schema::ProviderEntry {
+                api_key: Some(secrecy::Secret::new("sk-test-fireworks".into())),
+                ..Default::default()
+            });
+
+        let reg = ProviderRegistry::from_env_with_config(&config);
+        let fw_models: Vec<_> = reg
+            .list_models()
+            .iter()
+            .filter(|m| m.provider == "fireworks")
+            .collect();
+        assert!(
+            !fw_models.is_empty(),
+            "expected Fireworks models to be registered"
+        );
+        let provider = reg
+            .get(&format!(
+                "fireworks::{}",
+                fw_models[0].id.split("::").last().unwrap_or_default()
+            ))
+            .expect("fireworks model should be in registry");
+        assert!(
+            provider.supports_tools(),
+            "fireworks models must support tool calling"
         );
     }
 
@@ -4025,6 +4139,82 @@ mod tests {
             "anthropic::claude-opus-4-5-20251101@reasoning-high"
         );
         assert_eq!(variant_ids[4], "openai::gpt-4o");
+    }
+
+    #[test]
+    fn custom_provider_with_explicit_models_skips_discovery() {
+        let mut config = ProvidersConfig::default();
+        config.providers.insert(
+            "custom-mylocal".into(),
+            moltis_config::schema::ProviderEntry {
+                enabled: true,
+                api_key: Some(secret("sk-test")),
+                base_url: Some("http://localhost:8080/v1".into()),
+                models: vec!["my-model".into()],
+                fetch_models: true,
+                ..Default::default()
+            },
+        );
+        let pending = ProviderRegistry::fire_discoveries(&config, &HashMap::new());
+        let names: Vec<&str> = pending.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            !names.contains(&"custom-mylocal"),
+            "should not fire discovery for custom provider with explicit models, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn custom_provider_without_explicit_models_fires_discovery() {
+        let mut config = ProvidersConfig::default();
+        config.providers.insert(
+            "custom-mylocal".into(),
+            moltis_config::schema::ProviderEntry {
+                enabled: true,
+                api_key: Some(secret("sk-test")),
+                base_url: Some("http://localhost:8080/v1".into()),
+                models: vec![],
+                fetch_models: true,
+                ..Default::default()
+            },
+        );
+        let pending = ProviderRegistry::fire_discoveries(&config, &HashMap::new());
+        let names: Vec<&str> = pending.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"custom-mylocal"),
+            "should fire discovery for custom provider without explicit models, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn custom_provider_with_explicit_models_registers_from_empty_prefetch() {
+        // After the fix, fire_discoveries() won't spawn a discovery task for
+        // a custom provider that already has explicit models.  This means the
+        // prefetched map will have no entry for that provider.  Verify the
+        // explicit model is still registered in that scenario.
+        let mut config = ProvidersConfig::default();
+        config.providers.insert(
+            "custom-mylocal".into(),
+            moltis_config::schema::ProviderEntry {
+                enabled: true,
+                api_key: Some(secret("sk-test")),
+                base_url: Some("http://localhost:8080/v1".into()),
+                models: vec!["my-model".into()],
+                ..Default::default()
+            },
+        );
+        // Empty prefetched — mirrors the real scenario after the fix.
+        let registry = ProviderRegistry::from_config_with_prefetched(
+            &config,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        let models = registry.list_models();
+        assert!(
+            models
+                .iter()
+                .any(|m| m.id == "custom-mylocal::my-model" && m.provider == "custom-mylocal"),
+            "explicit model should be registered even with empty prefetch, got: {models:?}"
+        );
     }
 
     #[test]

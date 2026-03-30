@@ -3,9 +3,12 @@
 //! Uses HTTP POST for JSON-RPC requests and GET for server-initiated SSE events.
 //! Supports optional OAuth Bearer token injection and automatic 401 retry.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
 };
 
 use {
@@ -45,6 +48,11 @@ pub struct SseTransport {
 impl SseTransport {
     /// Create a new SSE transport pointing at the given MCP server URL.
     pub fn new(url: &str) -> Result<Arc<Self>> {
+        Self::new_with_timeout(url, Duration::from_secs(60))
+    }
+
+    /// Create a new SSE transport with a custom request timeout.
+    pub fn new_with_timeout(url: &str, request_timeout: Duration) -> Result<Arc<Self>> {
         let remote = ResolvedRemoteConfig::from_server_config(
             &crate::registry::McpServerConfig {
                 transport: crate::registry::TransportType::Sse,
@@ -53,12 +61,15 @@ impl SseTransport {
             },
             &std::collections::HashMap::new(),
         )?;
-        Self::new_with_remote(remote)
+        Self::new_with_remote(remote, request_timeout)
     }
 
-    pub fn new_with_remote(remote: ResolvedRemoteConfig) -> Result<Arc<Self>> {
+    pub fn new_with_remote(
+        remote: ResolvedRemoteConfig,
+        request_timeout: Duration,
+    ) -> Result<Arc<Self>> {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(request_timeout)
             .build()
             .context("failed to build HTTP client for SSE transport")?;
 
@@ -75,6 +86,15 @@ impl SseTransport {
 
     /// Create a new SSE transport with an OAuth auth provider.
     pub fn with_auth(url: &str, auth: SharedAuthProvider) -> Result<Arc<Self>> {
+        Self::with_auth_and_timeout(url, auth, Duration::from_secs(60))
+    }
+
+    /// Create a new SSE transport with an OAuth auth provider and custom request timeout.
+    pub fn with_auth_and_timeout(
+        url: &str,
+        auth: SharedAuthProvider,
+        request_timeout: Duration,
+    ) -> Result<Arc<Self>> {
         let remote = ResolvedRemoteConfig::from_server_config(
             &crate::registry::McpServerConfig {
                 transport: crate::registry::TransportType::Sse,
@@ -83,15 +103,16 @@ impl SseTransport {
             },
             &std::collections::HashMap::new(),
         )?;
-        Self::with_auth_remote(remote, auth)
+        Self::with_auth_remote(remote, auth, request_timeout)
     }
 
     pub fn with_auth_remote(
         remote: ResolvedRemoteConfig,
         auth: SharedAuthProvider,
+        request_timeout: Duration,
     ) -> Result<Arc<Self>> {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(request_timeout)
             .build()
             .context("failed to build HTTP client for SSE transport")?;
 
@@ -461,7 +482,13 @@ impl McpTransport for SseTransport {
         match req.send().await {
             Ok(resp) => {
                 self.store_session_id_from_response(&resp).await;
-                true
+                if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+                    return true;
+                }
+                // Any successful response means the server is reachable —
+                // Streamable HTTP servers may reply with application/json
+                // rather than text/event-stream, which is equally valid.
+                resp.status().is_success()
             },
             Err(_) => false,
         }
@@ -507,6 +534,13 @@ impl McpTransport for SseTransport {
 mod tests {
     use super::*;
 
+    fn unused_local_url() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        format!("http://{addr}/mcp")
+    }
+
     #[test]
     fn test_sse_transport_creation() {
         let transport = SseTransport::new("http://localhost:8080/mcp");
@@ -521,13 +555,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_sse_transport_is_alive_unreachable() {
-        let transport = SseTransport::new("http://127.0.0.1:1/mcp").unwrap();
+        let transport = SseTransport::new(&unused_local_url()).unwrap();
         assert!(!transport.is_alive().await);
     }
 
     #[tokio::test]
     async fn test_sse_transport_request_unreachable() {
-        let transport = SseTransport::new("http://127.0.0.1:1/mcp").unwrap();
+        let transport = SseTransport::new(&unused_local_url()).unwrap();
         let result = transport.request("test", None).await;
         assert!(result.is_err());
     }
@@ -620,7 +654,7 @@ mod tests {
             ("x-api-key", "secret-header"),
             ("authorization", "ApiKey raw-secret"),
         ]);
-        let transport = SseTransport::new_with_remote(remote).unwrap();
+        let transport = SseTransport::new_with_remote(remote, Duration::from_secs(60)).unwrap();
         let resp = transport.request("test", None).await.unwrap();
         assert!(resp.result.is_some());
         mock.assert_async().await;
@@ -734,7 +768,8 @@ mod tests {
             ("authorization", "ApiKey raw-secret"),
         ]);
         let auth: SharedAuthProvider = Arc::new(FixedTokenProvider);
-        let transport = SseTransport::with_auth_remote(remote, auth).unwrap();
+        let transport =
+            SseTransport::with_auth_remote(remote, auth, Duration::from_secs(60)).unwrap();
         let resp = transport.request("test", None).await.unwrap();
         assert!(resp.result.is_some());
         mock.assert_async().await;

@@ -2,7 +2,7 @@
 
 <a href="https://moltis.org"><img src="https://raw.githubusercontent.com/moltis-org/moltis/main/website/favicon.svg" alt="Moltis" width="64"></a>
 
-# Moltis — A Rust-native claw you can trust
+# Moltis — A secure persistent personal agent server in Rust
 
 One binary — sandboxed, secure, yours.
 
@@ -25,7 +25,7 @@ Moltis recently hit [the front page of Hacker News](https://news.ycombinator.com
 
 **Your hardware** — Runs on a Mac Mini, a Raspberry Pi, or any server you own. One Rust binary, no Node.js, no npm, no runtime.
 
-**Full-featured** — Voice, memory, scheduling, Telegram, Discord, browser automation, MCP servers — all built-in. No plugin marketplace to get supply-chain attacked through.
+**Full-featured** — Voice, memory, cross-session recall, automatic edit checkpoints, scheduling, Telegram, Discord, browser automation, MCP servers, SSH or node-backed remote exec, managed deploy keys with host pinning in the web UI, a live Settings → Tools inventory, Cursor-compatible project context, and context-file threat scanning — all built-in. No plugin marketplace to get supply-chain attacked through.
 
 **Auditable** — The agent loop + provider model fits in ~5K lines. The core (excluding the optional web UI) is ~196K lines across 46 modular crates you can audit independently, with 3,100+ tests and zero `unsafe` code\*.
 
@@ -123,16 +123,17 @@ See [Security Architecture](https://docs.moltis.org/security.html) for details.
 
 - **AI Gateway** — Multi-provider LLM support (OpenAI Codex, GitHub Copilot, Local), streaming responses, agent loop with sub-agent delegation, parallel tool execution
 - **Communication** — Web UI, Telegram, Microsoft Teams, Discord, API access, voice I/O (8 TTS + 7 STT providers), mobile PWA with push notifications
-- **Memory & Context** — Per-agent memory workspaces, embeddings-powered long-term memory, hybrid vector + full-text search, session persistence with auto-compaction, project context
+- **Memory & Recall** — Per-agent memory workspaces, embeddings-powered long-term memory, hybrid vector + full-text search, session persistence with auto-compaction, cross-session recall, Cursor-compatible project context, context-file safety scanning
+- **Safer Agent Editing** — Automatic checkpoints before built-in skill and memory mutations, restore tooling, session branching
 - **Extensibility** — MCP servers (stdio + HTTP/SSE), skill system, 15 lifecycle hook events with circuit breaker, destructive command guard
 - **Security** — Encryption-at-rest vault (XChaCha20-Poly1305 + Argon2id), password + passkey + API key auth, sandbox isolation, SSRF/CSWSH protection
-- **Operations** — Cron scheduling, OpenTelemetry tracing, Prometheus metrics, cloud deploy (Fly.io, DigitalOcean), Tailscale integration
+- **Operations** — Cron scheduling, OpenTelemetry tracing, Prometheus metrics, cloud deploy (Fly.io, DigitalOcean), Tailscale integration, managed SSH deploy keys, host-pinned remote targets, live tool inventory in Settings, and CLI/web remote-exec doctor flows
 
 ## How It Works
 
-Moltis is a **local-first AI gateway** — a single Rust binary that sits
-between you and multiple LLM providers. Everything runs on your machine; no
-cloud relay required.
+Moltis is a **local-first persistent agent server** — a single Rust binary that
+sits between you and multiple LLM providers, keeps durable session state, and
+can meet you across channels without handing your data to a cloud relay.
 
 ```
 ┌─────────────┐  ┌─────────────┐  ┌─────────────┐

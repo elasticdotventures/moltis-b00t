@@ -1,6 +1,13 @@
 //! McpManager: lifecycle management for multiple MCP server connections.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use {
     secrecy::ExposeSecret,
@@ -30,6 +37,9 @@ pub struct ServerStatus {
     pub command: String,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_timeout_secs: Option<u64>,
+    pub configured_request_timeout_secs: u64,
     pub transport: crate::registry::TransportType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -41,6 +51,9 @@ pub struct ServerStatus {
     /// Pending OAuth URL to open in browser (when auth_state is awaiting_browser).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_url: Option<String>,
+    /// Custom display name for the server (shown in UI).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 /// Mutable state behind the single `RwLock` on [`McpManager`].
@@ -56,17 +69,24 @@ pub struct McpManagerInner {
 /// Manages the lifecycle of multiple MCP server connections.
 pub struct McpManager {
     pub inner: RwLock<McpManagerInner>,
+    request_timeout_secs: AtomicU64,
 }
 
 impl McpManager {
     pub fn new(registry: McpRegistry) -> Self {
-        Self::new_with_env_overrides(registry, HashMap::new())
+        Self::new_with_env_overrides(registry, HashMap::new(), Duration::from_secs(30))
+    }
+
+    pub fn new_with_request_timeout(registry: McpRegistry, request_timeout: Duration) -> Self {
+        Self::new_with_env_overrides(registry, HashMap::new(), request_timeout)
     }
 
     pub fn new_with_env_overrides(
         registry: McpRegistry,
         env_overrides: HashMap<String, String>,
+        request_timeout: Duration,
     ) -> Self {
+        let request_timeout_secs = request_timeout.as_secs().max(1);
         Self {
             inner: RwLock::new(McpManagerInner {
                 clients: HashMap::new(),
@@ -75,11 +95,34 @@ impl McpManager {
                 auth_providers: HashMap::new(),
                 env_overrides,
             }),
+            request_timeout_secs: AtomicU64::new(request_timeout_secs),
         }
     }
 
     pub async fn set_env_overrides(&self, env_overrides: HashMap<String, String>) {
         self.inner.write().await.env_overrides = env_overrides;
+    }
+
+    pub fn set_request_timeout_secs(&self, request_timeout_secs: u64) {
+        self.request_timeout_secs
+            .store(request_timeout_secs.max(1), Ordering::Relaxed);
+    }
+
+    fn default_request_timeout_secs(&self) -> u64 {
+        self.request_timeout_secs.load(Ordering::Relaxed).max(1)
+    }
+
+    fn effective_timeout_for(&self, config: &McpServerConfig) -> Duration {
+        Duration::from_secs(
+            config
+                .request_timeout_secs
+                .filter(|secs| *secs > 0)
+                .unwrap_or(self.default_request_timeout_secs()),
+        )
+    }
+
+    fn effective_timeout_secs_for(&self, config: &McpServerConfig) -> u64 {
+        self.effective_timeout_for(config).as_secs()
     }
 
     fn build_auth_provider(
@@ -174,13 +217,19 @@ impl McpManager {
                     config.oauth.is_some(),
                     has_stored_token,
                 ) {
-                    let client =
-                        McpClient::connect_sse_with_auth(name, &remote, auth_provider.clone())
-                            .await?;
+                    let client = McpClient::connect_sse_with_auth(
+                        name,
+                        &remote,
+                        auth_provider.clone(),
+                        self.effective_timeout_for(config),
+                    )
+                    .await?;
                     (client, Some(auth_provider))
                 } else {
                     // No hint that auth is needed yet, probe unauthenticated first.
-                    match McpClient::connect_sse(name, &remote).await {
+                    match McpClient::connect_sse(name, &remote, self.effective_timeout_for(config))
+                        .await
+                    {
                         Ok(client) => (client, None),
                         Err(e) => {
                             // Check if it's a 401 Unauthorized.
@@ -212,6 +261,7 @@ impl McpManager {
                                     name,
                                     &remote,
                                     auth_provider.clone(),
+                                    self.effective_timeout_for(config),
                                 )
                                 .await?;
                                 (client, Some(auth_provider))
@@ -223,8 +273,14 @@ impl McpManager {
                 }
             },
             TransportType::Stdio => {
-                let client =
-                    McpClient::connect(name, &config.command, &config.args, &config.env).await?;
+                let client = McpClient::connect(
+                    name,
+                    &config.command,
+                    &config.args,
+                    &config.env,
+                    self.effective_timeout_for(config),
+                )
+                .await?;
                 (client, None)
             },
         };
@@ -391,6 +447,8 @@ impl McpManager {
                 } else {
                     config.env.clone()
                 },
+                request_timeout_secs: config.request_timeout_secs,
+                configured_request_timeout_secs: self.effective_timeout_secs_for(config),
                 transport: config.transport,
                 url: config
                     .url
@@ -399,6 +457,7 @@ impl McpManager {
                 header_names: header_names(&config.headers),
                 auth_state,
                 auth_url: None,
+                display_name: config.display_name.clone(),
             });
         }
         statuses
@@ -667,6 +726,37 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].auth_state, Some(McpAuthState::AwaitingBrowser));
         assert!(statuses[0].auth_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_status_clamps_zero_timeouts_to_one_second() {
+        let mut reg = McpRegistry::new();
+        reg.servers.insert("test".into(), McpServerConfig {
+            command: "echo".into(),
+            request_timeout_secs: Some(0),
+            ..Default::default()
+        });
+        let mgr = McpManager::new_with_request_timeout(reg, Duration::from_secs(0));
+
+        let statuses = mgr.status_all().await;
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].configured_request_timeout_secs, 1);
+    }
+
+    #[tokio::test]
+    async fn test_status_uses_updated_default_timeout() {
+        let mut reg = McpRegistry::new();
+        reg.servers.insert("test".into(), McpServerConfig {
+            command: "echo".into(),
+            ..Default::default()
+        });
+        let mgr = McpManager::new_with_request_timeout(reg, Duration::from_secs(30));
+
+        mgr.set_request_timeout_secs(75);
+
+        let statuses = mgr.status_all().await;
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].configured_request_timeout_secs, 75);
     }
 
     #[tokio::test]

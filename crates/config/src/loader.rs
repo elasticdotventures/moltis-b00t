@@ -1354,6 +1354,13 @@ mod tests {
     }
 
     #[test]
+    fn apply_env_overrides_mcp_request_timeout() {
+        let vars = vec![("MOLTIS_MCP__REQUEST_TIMEOUT_SECS".into(), "90".into())];
+        let config = apply_env_overrides_with(MoltisConfig::default(), vars.into_iter());
+        assert_eq!(config.mcp.request_timeout_secs, 90);
+    }
+
+    #[test]
     fn apply_env_overrides_providers_offered_array() {
         let vars = vec![(
             "MOLTIS_PROVIDERS__OFFERED".into(),

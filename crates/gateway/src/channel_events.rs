@@ -20,11 +20,20 @@ use crate::{
 };
 
 /// Default (deterministic) session key for a channel chat.
+///
+/// For Telegram forum topics the thread ID is appended so each topic gets its
+/// own session: `telegram:bot:chat:thread`.
 fn default_channel_session_key(target: &ChannelReplyTarget) -> String {
-    format!(
-        "{}:{}:{}",
-        target.channel_type, target.account_id, target.chat_id
-    )
+    match &target.thread_id {
+        Some(tid) => format!(
+            "{}:{}:{}:{}",
+            target.channel_type, target.account_id, target.chat_id, tid
+        ),
+        None => format!(
+            "{}:{}:{}",
+            target.channel_type, target.account_id, target.chat_id
+        ),
+    }
 }
 
 /// Resolve the active session key for a channel chat.
@@ -39,6 +48,7 @@ async fn resolve_channel_session(
             target.channel_type.as_str(),
             &target.account_id,
             &target.chat_id,
+            target.thread_id.as_deref(),
         )
         .await
     {
@@ -399,7 +409,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     if let Err(send_err) = outbound
                         .send_text(
                             &reply_to.account_id,
-                            &reply_to.chat_id,
+                            &reply_to.outbound_to(),
                             &error_msg,
                             reply_to.message_id.as_deref(),
                         )
@@ -903,7 +913,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 if let Err(send_err) = outbound
                     .send_text(
                         &reply_to.account_id,
-                        &reply_to.chat_id,
+                        &reply_to.outbound_to(),
                         &error_msg,
                         reply_to.message_id.as_deref(),
                     )
@@ -1003,6 +1013,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         reply_to.channel_type.as_str(),
                         &reply_to.account_id,
                         &reply_to.chat_id,
+                        reply_to.thread_id.as_deref(),
                         &new_key,
                     )
                     .await;
@@ -1220,6 +1231,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                             reply_to.channel_type.as_str(),
                             &reply_to.account_id,
                             &reply_to.chat_id,
+                            reply_to.thread_id.as_deref(),
                             &target_session.key,
                         )
                         .await;
@@ -1766,6 +1778,7 @@ mod tests {
             account_id: "bot1".into(),
             chat_id: "12345".into(),
             message_id: None,
+            thread_id: None,
         };
         assert_eq!(default_channel_session_key(&target), "telegram:bot1:12345");
     }
@@ -1777,10 +1790,26 @@ mod tests {
             account_id: "bot1".into(),
             chat_id: "-100999".into(),
             message_id: None,
+            thread_id: None,
         };
         assert_eq!(
             default_channel_session_key(&target),
             "telegram:bot1:-100999"
+        );
+    }
+
+    #[test]
+    fn channel_session_key_forum_topic() {
+        let target = ChannelReplyTarget {
+            channel_type: ChannelType::Telegram,
+            account_id: "bot1".into(),
+            chat_id: "-100999".into(),
+            message_id: None,
+            thread_id: Some("42".into()),
+        };
+        assert_eq!(
+            default_channel_session_key(&target),
+            "telegram:bot1:-100999:42"
         );
     }
 

@@ -421,6 +421,18 @@ impl moltis_service_traits::SkillsService for MockSkills {
         self.0.call("skills.repos.remove", p)
     }
 
+    async fn repos_export(&self, p: Value) -> ServiceResult {
+        self.0.call("skills.repos.export", p)
+    }
+
+    async fn repos_import(&self, p: Value) -> ServiceResult {
+        self.0.call("skills.repos.import", p)
+    }
+
+    async fn repos_unquarantine(&self, p: Value) -> ServiceResult {
+        self.0.call("skills.repos.unquarantine", p)
+    }
+
     async fn emergency_disable(&self) -> ServiceResult {
         self.0.call("skills.emergency_disable", json!({}))
     }
@@ -451,6 +463,10 @@ impl moltis_service_traits::SkillsService for MockSkills {
 
     async fn security_scan(&self) -> ServiceResult {
         self.0.call("skills.security.scan", json!({}))
+    }
+
+    async fn skill_save(&self, p: Value) -> ServiceResult {
+        self.0.call("skills.skill.save", p)
     }
 }
 

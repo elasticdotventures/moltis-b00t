@@ -5,7 +5,7 @@ export default {
 	title: "技能",
 	refresh: "刷新",
 	emergencyDisable: "紧急禁用",
-	description: "从项目、个人和已安装路径发现的基于 SKILL.md 的技能。",
+	description: "从项目、个人和已安装路径发现的基于 SKILL.md 的技能。导入的技能包会先保持隔离，直到明确解除隔离。",
 	howToWriteSkill: "如何编写技能？",
 
 	// ── Emergency disable ───────────────────────────────────

@@ -277,6 +277,7 @@ impl MsTeamsPlugin {
             account_id: account_id.to_string(),
             chat_id: chat_id.clone(),
             message_id: activity.id,
+            thread_id: None,
         };
 
         let Some(sink) = event_sink else {
@@ -433,7 +434,7 @@ impl ChannelPlugin for MsTeamsPlugin {
         let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
         accounts
             .get(account_id)
-            .and_then(|s| serde_json::to_value(&s.config).ok())
+            .and_then(|s| serde_json::to_value(crate::config::RedactedConfig(&s.config)).ok())
     }
 
     fn update_account_config(

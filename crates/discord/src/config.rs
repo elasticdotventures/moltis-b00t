@@ -5,8 +5,9 @@ use {
         config_view::ChannelConfigView,
         gating::{DmPolicy, GroupPolicy, MentionMode},
     },
-    secrecy::{ExposeSecret, Secret},
-    serde::{Deserialize, Serialize},
+    moltis_common::secret_serde,
+    secrecy::Secret,
+    serde::{Deserialize, Serialize, ser::SerializeStruct},
 };
 
 /// Per-channel model/provider override.
@@ -55,7 +56,7 @@ pub enum OnlineStatus {
 #[serde(default)]
 pub struct DiscordAccountConfig {
     /// Discord bot token.
-    #[serde(serialize_with = "serialize_secret")]
+    #[serde(serialize_with = "secret_serde::serialize_secret")]
     pub token: Secret<String>,
 
     /// DM access policy.
@@ -218,11 +219,57 @@ impl Default for DiscordAccountConfig {
     }
 }
 
-fn serialize_secret<S: serde::Serializer>(
-    secret: &Secret<String>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(secret.expose_secret())
+/// Wrapper that serializes secret fields as `"[REDACTED]"` for API responses.
+pub struct RedactedConfig<'a>(pub &'a DiscordAccountConfig);
+
+impl Serialize for RedactedConfig<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let c = self.0;
+        let mut count = 9; // always-present fields
+        count += c.model.is_some() as usize;
+        count += c.model_provider.is_some() as usize;
+        count += c.ack_reaction.is_some() as usize;
+        count += c.activity.is_some() as usize;
+        count += c.activity_type.is_some() as usize;
+        count += c.status.is_some() as usize;
+        count += !c.channel_overrides.is_empty() as usize;
+        count += !c.user_overrides.is_empty() as usize;
+        let mut s = serializer.serialize_struct("DiscordAccountConfig", count)?;
+        s.serialize_field("token", secret_serde::REDACTED)?;
+        s.serialize_field("dm_policy", &c.dm_policy)?;
+        s.serialize_field("group_policy", &c.group_policy)?;
+        s.serialize_field("mention_mode", &c.mention_mode)?;
+        s.serialize_field("allowlist", &c.allowlist)?;
+        s.serialize_field("guild_allowlist", &c.guild_allowlist)?;
+        if c.model.is_some() {
+            s.serialize_field("model", &c.model)?;
+        }
+        if c.model_provider.is_some() {
+            s.serialize_field("model_provider", &c.model_provider)?;
+        }
+        s.serialize_field("reply_to_message", &c.reply_to_message)?;
+        if c.ack_reaction.is_some() {
+            s.serialize_field("ack_reaction", &c.ack_reaction)?;
+        }
+        if c.activity.is_some() {
+            s.serialize_field("activity", &c.activity)?;
+        }
+        if c.activity_type.is_some() {
+            s.serialize_field("activity_type", &c.activity_type)?;
+        }
+        if c.status.is_some() {
+            s.serialize_field("status", &c.status)?;
+        }
+        s.serialize_field("otp_self_approval", &c.otp_self_approval)?;
+        s.serialize_field("otp_cooldown_secs", &c.otp_cooldown_secs)?;
+        if !c.channel_overrides.is_empty() {
+            s.serialize_field("channel_overrides", &c.channel_overrides)?;
+        }
+        if !c.user_overrides.is_empty() {
+            s.serialize_field("user_overrides", &c.user_overrides)?;
+        }
+        s.end()
+    }
 }
 
 #[cfg(test)]
@@ -543,6 +590,30 @@ mod tests {
             serde_json::from_value(value).unwrap_or_else(|e| panic!("re-parse failed: {e}"));
         assert_eq!(cfg2.channel_model("C123"), Some("gpt-4"));
         assert_eq!(cfg2.user_model("U456"), Some("claude-sonnet"));
+    }
+
+    #[test]
+    fn redacted_hides_token() {
+        let cfg = DiscordAccountConfig {
+            token: Secret::new("super-secret-bot-token".into()),
+            model: Some("gpt-4o".into()),
+            ..Default::default()
+        };
+        let redacted = serde_json::to_value(RedactedConfig(&cfg))
+            .unwrap_or_else(|e| panic!("redacted serialize failed: {e}"));
+        assert_eq!(redacted["token"], "[REDACTED]");
+        // Non-secret fields preserved
+        assert_eq!(redacted["model"], "gpt-4o");
+        assert_eq!(
+            redacted["dm_policy"],
+            serde_json::to_value(&cfg.dm_policy)
+                .unwrap_or_else(|e| panic!("dm_policy serialize failed: {e}"))
+        );
+
+        // Storage path still exposes the token
+        let storage =
+            serde_json::to_value(&cfg).unwrap_or_else(|e| panic!("storage serialize failed: {e}"));
+        assert_eq!(storage["token"], "super-secret-bot-token");
     }
 
     #[test]

@@ -12,7 +12,10 @@ use {
     moltis_protocol::{ErrorShape, error_codes},
 };
 
-use crate::broadcast::{BroadcastOpts, broadcast};
+use crate::{
+    broadcast::{BroadcastOpts, broadcast},
+    services::ServiceError,
+};
 
 use super::{MethodContext, MethodRegistry};
 
@@ -1633,34 +1636,35 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                         .map_err(ErrorShape::from)?;
                     let jobs: Vec<moltis_cron::types::CronJob> =
                         serde_json::from_value(jobs_val).unwrap_or_default();
-                    if let Some(hb_job) = jobs.iter().find(|j| j.name == "__heartbeat__") {
-                        let interval_ms = moltis_cron::heartbeat::parse_interval_ms(&patch.every)
-                            .unwrap_or(moltis_cron::heartbeat::DEFAULT_INTERVAL_MS);
-                        let heartbeat_md = moltis_config::load_heartbeat_md();
-                        let (prompt, prompt_source) =
-                            moltis_cron::heartbeat::resolve_heartbeat_prompt(
-                                patch.prompt.as_deref(),
-                                heartbeat_md.as_deref(),
-                            );
-                        if prompt_source
-                            == moltis_cron::heartbeat::HeartbeatPromptSource::HeartbeatMd
-                        {
-                            tracing::info!("loaded heartbeat prompt from HEARTBEAT.md");
-                        }
-                        if patch.prompt.as_deref().is_some_and(|p| !p.trim().is_empty())
-                            && heartbeat_md.as_deref().is_some_and(|p| !p.trim().is_empty())
-                            && prompt_source
-                                == moltis_cron::heartbeat::HeartbeatPromptSource::Config
-                        {
-                            tracing::warn!(
-                                "heartbeat prompt source conflict: config heartbeat.prompt overrides HEARTBEAT.md"
-                            );
-                        }
-                        // Disable the job when there is no meaningful prompt,
-                        // even if the user toggled enabled=true.
-                        let has_prompt = prompt_source
-                            != moltis_cron::heartbeat::HeartbeatPromptSource::Default;
-                        let effective_enabled = patch.enabled && has_prompt;
+                    let interval_ms = moltis_cron::heartbeat::parse_interval_ms(&patch.every)
+                        .unwrap_or(moltis_cron::heartbeat::DEFAULT_INTERVAL_MS);
+                    let heartbeat_md = moltis_config::load_heartbeat_md();
+                    let (prompt, prompt_source) =
+                        moltis_cron::heartbeat::resolve_heartbeat_prompt(
+                            patch.prompt.as_deref(),
+                            heartbeat_md.as_deref(),
+                        );
+                    if prompt_source
+                        == moltis_cron::heartbeat::HeartbeatPromptSource::HeartbeatMd
+                    {
+                        tracing::info!("loaded heartbeat prompt from HEARTBEAT.md");
+                    }
+                    if patch.prompt.as_deref().is_some_and(|p| !p.trim().is_empty())
+                        && heartbeat_md.as_deref().is_some_and(|p| !p.trim().is_empty())
+                        && prompt_source
+                            == moltis_cron::heartbeat::HeartbeatPromptSource::Config
+                    {
+                        tracing::warn!(
+                            "heartbeat prompt source conflict: config heartbeat.prompt overrides HEARTBEAT.md"
+                        );
+                    }
+                    // Disable the job when there is no meaningful prompt,
+                    // even if the user toggled enabled=true.
+                    let has_prompt = prompt_source
+                        != moltis_cron::heartbeat::HeartbeatPromptSource::Default;
+                    let effective_enabled = patch.enabled && has_prompt;
+
+                    if let Some(hb_job) = jobs.iter().find(|j| j.id == "__heartbeat__") {
                         let job_patch = moltis_cron::types::CronJobPatch {
                             schedule: Some(moltis_cron::types::CronSchedule::Every {
                                 every_ms: interval_ms,
@@ -1688,6 +1692,41 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                                 "id": hb_job.id,
                                 "patch": job_patch,
                             }))
+                            .await
+                            .map_err(ErrorShape::from)?;
+                    } else if effective_enabled {
+                        // Create the heartbeat job only when enabled with a valid prompt.
+                        let create = moltis_cron::types::CronJobCreate {
+                            id: Some("__heartbeat__".into()),
+                            name: "__heartbeat__".into(),
+                            schedule: moltis_cron::types::CronSchedule::Every {
+                                every_ms: interval_ms,
+                                anchor_ms: None,
+                            },
+                            payload: moltis_cron::types::CronPayload::AgentTurn {
+                                message: prompt,
+                                model: patch.model.clone(),
+                                timeout_secs: None,
+                                deliver: patch.deliver,
+                                channel: patch.channel.clone(),
+                                to: patch.to.clone(),
+                            },
+                            session_target: moltis_cron::types::SessionTarget::Named("heartbeat".into()),
+                            delete_after_run: false,
+                            enabled: effective_enabled,
+                            system: true,
+                            sandbox: moltis_cron::types::CronSandboxConfig {
+                                enabled: patch.sandbox_enabled,
+                                image: patch.sandbox_image.clone(),
+                            },
+                            wake_mode: moltis_cron::types::CronWakeMode::default(),
+                        };
+                        let create_json = serde_json::to_value(create)
+                            .map_err(|e| ErrorShape::new(error_codes::INVALID_REQUEST, format!("failed to serialize job: {e}")))?;
+                        ctx.state
+                            .services
+                            .cron
+                            .add(create_json)
                             .await
                             .map_err(ErrorShape::from)?;
                     }
@@ -2546,6 +2585,45 @@ pub(super) fn register(reg: &mut MethodRegistry) {
         }),
     );
     reg.register(
+        "skills.repos.export",
+        Box::new(|ctx| {
+            Box::pin(async move {
+                ctx.state
+                    .services
+                    .skills
+                    .repos_export(ctx.params.clone())
+                    .await
+                    .map_err(ErrorShape::from)
+            })
+        }),
+    );
+    reg.register(
+        "skills.repos.import",
+        Box::new(|ctx| {
+            Box::pin(async move {
+                ctx.state
+                    .services
+                    .skills
+                    .repos_import(ctx.params.clone())
+                    .await
+                    .map_err(ErrorShape::from)
+            })
+        }),
+    );
+    reg.register(
+        "skills.repos.unquarantine",
+        Box::new(|ctx| {
+            Box::pin(async move {
+                ctx.state
+                    .services
+                    .skills
+                    .repos_unquarantine(ctx.params.clone())
+                    .await
+                    .map_err(ErrorShape::from)
+            })
+        }),
+    );
+    reg.register(
         "skills.emergency_disable",
         Box::new(|ctx| {
             Box::pin(async move {
@@ -2618,6 +2696,19 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                     .services
                     .skills
                     .install_dep(ctx.params.clone())
+                    .await
+                    .map_err(ErrorShape::from)
+            })
+        }),
+    );
+    reg.register(
+        "skills.skill.save",
+        Box::new(|ctx| {
+            Box::pin(async move {
+                ctx.state
+                    .services
+                    .skills
+                    .skill_save(ctx.params.clone())
                     .await
                     .map_err(ErrorShape::from)
             })
@@ -2778,6 +2869,70 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                     .update(ctx.params.clone())
                     .await
                     .map_err(ErrorShape::from)
+            })
+        }),
+    );
+    reg.register(
+        "mcp.config.get",
+        Box::new(|_ctx| {
+            Box::pin(async move {
+                let config = moltis_config::discover_and_load();
+                Ok(serde_json::json!({
+                    "request_timeout_secs": config.mcp.request_timeout_secs,
+                }))
+            })
+        }),
+    );
+    reg.register(
+        "mcp.config.update",
+        Box::new(|ctx| {
+            Box::pin(async move {
+                let request_timeout_secs = match ctx.params.get("request_timeout_secs") {
+                    None => {
+                        return Err(ServiceError::message(
+                            "missing 'request_timeout_secs' parameter",
+                        )
+                        .into());
+                    },
+                    Some(value) => value.as_u64().ok_or_else(|| {
+                        ServiceError::message(
+                            "invalid 'request_timeout_secs' parameter: expected a positive integer",
+                        )
+                    })?,
+                };
+
+                if request_timeout_secs == 0 {
+                    return Err(ServiceError::message(
+                        "request_timeout_secs must be greater than 0",
+                    )
+                    .into());
+                }
+
+                // Update in-memory first (infallible atomic store), then persist
+                // to disk.  This ordering means a crash between the two steps
+                // leaves the runtime correct and only the file stale — the next
+                // restart reads the file anyway.
+                ctx.state
+                    .services
+                    .mcp
+                    .update_request_timeout(request_timeout_secs)
+                    .await
+                    .map_err(ErrorShape::from)?;
+
+                if let Err(e) = moltis_config::update_config(|cfg| {
+                    cfg.mcp.request_timeout_secs = request_timeout_secs;
+                }) {
+                    tracing::warn!(error = %e, "failed to persist MCP config");
+                    return Err(ServiceError::message(format!(
+                        "failed to persist MCP config: {e}"
+                    ))
+                    .into());
+                }
+
+                Ok(serde_json::json!({
+                    "request_timeout_secs": request_timeout_secs,
+                    "restart_required": true,
+                }))
             })
         }),
     );

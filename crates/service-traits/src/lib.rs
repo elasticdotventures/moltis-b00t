@@ -540,6 +540,10 @@ pub trait McpService: Send + Sync {
     async fn oauth_start(&self, params: Value) -> ServiceResult;
     /// Complete an MCP OAuth callback.
     async fn oauth_complete(&self, params: Value) -> ServiceResult;
+    /// Update the runtime MCP request timeout default.
+    async fn update_request_timeout(&self, _request_timeout_secs: u64) -> ServiceResult {
+        Ok(serde_json::json!({ "ok": true }))
+    }
 }
 
 pub struct NoopMcpService;
@@ -609,6 +613,9 @@ pub trait SkillsService: Send + Sync {
     /// Full repos list with per-skill details (for search). Heavyweight.
     async fn repos_list_full(&self) -> ServiceResult;
     async fn repos_remove(&self, params: Value) -> ServiceResult;
+    async fn repos_export(&self, params: Value) -> ServiceResult;
+    async fn repos_import(&self, params: Value) -> ServiceResult;
+    async fn repos_unquarantine(&self, params: Value) -> ServiceResult;
     async fn emergency_disable(&self) -> ServiceResult;
     async fn skill_enable(&self, params: Value) -> ServiceResult;
     async fn skill_disable(&self, params: Value) -> ServiceResult;
@@ -617,6 +624,9 @@ pub trait SkillsService: Send + Sync {
     async fn install_dep(&self, params: Value) -> ServiceResult;
     async fn security_status(&self) -> ServiceResult;
     async fn security_scan(&self) -> ServiceResult;
+    /// Save (create or update) a personal skill.  When the source is a repo
+    /// or project, the skill is forked into `~/.moltis/skills/` first.
+    async fn skill_save(&self, params: Value) -> ServiceResult;
 }
 
 /// Minimal stub for `SkillsService` used only by the `Services::default()` impl.
@@ -662,6 +672,18 @@ impl SkillsService for NoopSkillsStub {
         Err("skills service not configured".into())
     }
 
+    async fn repos_export(&self, _params: Value) -> ServiceResult {
+        Err("skills service not configured".into())
+    }
+
+    async fn repos_import(&self, _params: Value) -> ServiceResult {
+        Err("skills service not configured".into())
+    }
+
+    async fn repos_unquarantine(&self, _params: Value) -> ServiceResult {
+        Err("skills service not configured".into())
+    }
+
     async fn emergency_disable(&self) -> ServiceResult {
         Ok(serde_json::json!({ "ok": true }))
     }
@@ -691,6 +713,10 @@ impl SkillsService for NoopSkillsStub {
     }
 
     async fn security_scan(&self) -> ServiceResult {
+        Err("skills service not configured".into())
+    }
+
+    async fn skill_save(&self, _params: Value) -> ServiceResult {
         Err("skills service not configured".into())
     }
 }

@@ -264,6 +264,7 @@ pub async fn handle_verified_interaction_webhook(
             account_id: account_id.to_string(),
             chat_id: channel_id.to_string(),
             message_id: None,
+            thread_id: None,
         };
         match sink.dispatch_interaction(action_id, reply_to).await {
             Ok(_) => {},
@@ -438,6 +439,7 @@ pub async fn handle_interaction_webhook(
             account_id: account_id.to_string(),
             chat_id: channel_id.to_string(),
             message_id: None,
+            thread_id: None,
         };
         match sink.dispatch_interaction(action_id, reply_to).await {
             Ok(_) => {},

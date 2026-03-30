@@ -18,6 +18,8 @@ pub struct AnthropicProvider {
     alias: Option<String>,
     /// Optional reasoning effort level for extended thinking.
     reasoning_effort: Option<moltis_agents::model::ReasoningEffort>,
+    /// Prompt cache retention policy. When `None`, caching is disabled.
+    cache_retention: moltis_config::CacheRetention,
 }
 
 impl AnthropicProvider {
@@ -29,6 +31,7 @@ impl AnthropicProvider {
             client: crate::shared_http_client(),
             alias: None,
             reasoning_effort: None,
+            cache_retention: moltis_config::CacheRetention::Short,
         }
     }
 
@@ -46,7 +49,19 @@ impl AnthropicProvider {
             client: crate::shared_http_client(),
             alias,
             reasoning_effort: None,
+            cache_retention: moltis_config::CacheRetention::Short,
         }
+    }
+
+    #[must_use]
+    pub fn with_cache_retention(mut self, cache_retention: moltis_config::CacheRetention) -> Self {
+        self.cache_retention = cache_retention;
+        self
+    }
+
+    /// Returns `true` when prompt caching is enabled (short or long retention).
+    fn caching_enabled(&self) -> bool {
+        !matches!(self.cache_retention, moltis_config::CacheRetention::None)
     }
 
     /// Apply `thinking` configuration to an Anthropic request body based on
@@ -116,11 +131,18 @@ fn with_retry_after_marker(base: String, retry_after_ms: Option<u64>) -> String 
 
 /// Convert `ChatMessage` list to Anthropic format.
 ///
-/// Returns `(system_text, anthropic_messages)`. System messages are extracted
-/// (Anthropic takes them as a top-level `system` field). Tool messages become
-/// user messages with `tool_result` content blocks. Assistant messages with
-/// tool calls become `content` arrays with `tool_use` blocks.
-fn to_anthropic_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<serde_json::Value>) {
+/// Returns `(system_blocks_or_text, anthropic_messages)`. System messages are
+/// extracted (Anthropic takes them as a top-level `system` field).
+///
+/// When `caching` is true, the system prompt is returned as a content-block
+/// array with `cache_control` on the last block, and the last user message
+/// gets `cache_control` on its final content block (enabling prompt caching
+/// on the conversation prefix). When `caching` is false, system is returned
+/// as a plain string and no `cache_control` blocks are injected.
+fn to_anthropic_messages(
+    messages: &[ChatMessage],
+    caching: bool,
+) -> (Option<serde_json::Value>, Vec<serde_json::Value>) {
     let mut system_text: Option<String> = None;
     let mut out = Vec::new();
 
@@ -201,7 +223,59 @@ fn to_anthropic_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<serde
         }
     }
 
-    (system_text, out)
+    let system_value = system_text.map(|text| {
+        if caching {
+            // Content-block array with cache_control on the last block.
+            serde_json::json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": { "type": "ephemeral" }
+            }])
+        } else {
+            // Plain string — no caching.
+            serde_json::Value::String(text)
+        }
+    });
+
+    if caching {
+        inject_cache_control_on_last_user_message(&mut out);
+    }
+
+    (system_value, out)
+}
+
+/// Find the last user message in the output array and add `cache_control`
+/// to its final content block, enabling Anthropic prompt caching on the
+/// conversation prefix.
+fn inject_cache_control_on_last_user_message(messages: &mut [serde_json::Value]) {
+    let cache_control = serde_json::json!({ "type": "ephemeral" });
+
+    let Some(last_user) = messages
+        .iter_mut()
+        .rev()
+        .find(|m| m.get("role").and_then(serde_json::Value::as_str) == Some("user"))
+    else {
+        return;
+    };
+
+    match last_user.get_mut("content") {
+        // String content — convert to content-block array with cache_control.
+        Some(content) if content.is_string() => {
+            let text = content.as_str().unwrap_or_default().to_string();
+            last_user["content"] = serde_json::json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": cache_control
+            }]);
+        },
+        // Array content — add cache_control to the last block.
+        Some(content) if content.is_array() => {
+            if let Some(last_block) = content.as_array_mut().and_then(|arr| arr.last_mut()) {
+                last_block["cache_control"] = cache_control;
+            }
+        },
+        _ => {},
+    }
 }
 
 #[async_trait]
@@ -225,6 +299,7 @@ impl LlmProvider for AnthropicProvider {
             client: self.client,
             alias: self.alias.clone(),
             reasoning_effort: Some(effort),
+            cache_retention: self.cache_retention,
         }))
     }
 
@@ -249,7 +324,8 @@ impl LlmProvider for AnthropicProvider {
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
     ) -> anyhow::Result<CompletionResponse> {
-        let (system_text, anthropic_messages) = to_anthropic_messages(messages);
+        let caching = self.caching_enabled();
+        let (system_value, anthropic_messages) = to_anthropic_messages(messages, caching);
 
         let mut body = serde_json::json!({
             "model": self.model,
@@ -257,8 +333,8 @@ impl LlmProvider for AnthropicProvider {
             "messages": anthropic_messages,
         });
 
-        if let Some(ref sys) = system_text {
-            body["system"] = serde_json::Value::String(sys.clone());
+        if let Some(ref sys) = system_value {
+            body["system"] = sys.clone();
         }
 
         if !tools.is_empty() {
@@ -271,7 +347,8 @@ impl LlmProvider for AnthropicProvider {
             model = %self.model,
             messages_count = anthropic_messages.len(),
             tools_count = tools.len(),
-            has_system = system_text.is_some(),
+            has_system = system_value.is_some(),
+            caching = caching,
             reasoning_effort = ?self.reasoning_effort,
             "anthropic complete request"
         );
@@ -330,6 +407,16 @@ impl LlmProvider for AnthropicProvider {
                 .unwrap_or(0) as u32,
         };
 
+        if usage.cache_read_tokens > 0 || usage.cache_write_tokens > 0 {
+            debug!(
+                model = %self.model,
+                cache_read = usage.cache_read_tokens,
+                cache_write = usage.cache_write_tokens,
+                input = usage.input_tokens,
+                "anthropic prompt cache"
+            );
+        }
+
         Ok(CompletionResponse {
             text,
             tool_calls,
@@ -352,7 +439,8 @@ impl LlmProvider for AnthropicProvider {
         tools: Vec<serde_json::Value>,
     ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
         Box::pin(async_stream::stream! {
-            let (system_text, anthropic_messages) = to_anthropic_messages(&messages);
+            let caching = self.caching_enabled();
+            let (system_value, anthropic_messages) = to_anthropic_messages(&messages, caching);
 
             let mut body = serde_json::json!({
                 "model": self.model,
@@ -361,8 +449,8 @@ impl LlmProvider for AnthropicProvider {
                 "stream": true,
             });
 
-            if let Some(ref sys) = system_text {
-                body["system"] = serde_json::Value::String(sys.clone());
+            if let Some(ref sys) = system_value {
+                body["system"] = sys.clone();
             }
 
             if !tools.is_empty() {
@@ -375,7 +463,8 @@ impl LlmProvider for AnthropicProvider {
                 model = %self.model,
                 messages_count = anthropic_messages.len(),
                 tools_count = tools.len(),
-                has_system = system_text.is_some(),
+                has_system = system_value.is_some(),
+                caching = caching,
                 reasoning_effort = ?self.reasoning_effort,
                 "anthropic stream_with_tools request"
             );
@@ -578,6 +667,7 @@ mod tests {
             client: crate::shared_http_client(),
             alias: None,
             reasoning_effort: Some(moltis_agents::model::ReasoningEffort::High),
+            cache_retention: moltis_config::CacheRetention::Short,
         };
         let mut body =
             serde_json::json!({ "model": "claude-opus-4-5-20251101", "max_tokens": 4096 });
@@ -610,6 +700,7 @@ mod tests {
             client: crate::shared_http_client(),
             alias: None,
             reasoning_effort: Some(moltis_agents::model::ReasoningEffort::Low),
+            cache_retention: moltis_config::CacheRetention::Short,
         };
         let mut body = serde_json::json!({ "model": "test", "max_tokens": 4096 });
         provider.apply_thinking(&mut body);
@@ -637,5 +728,166 @@ mod tests {
             Some(moltis_agents::model::ReasoningEffort::High)
         );
         assert_eq!(with_effort.id(), "claude-opus-4-5-20251101");
+    }
+
+    #[test]
+    fn to_anthropic_messages_merges_all_system_into_top_level() {
+        use moltis_agents::model::{ChatMessage, UserContent};
+
+        let messages = vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::User {
+                content: UserContent::Text("hello".into()),
+            },
+            ChatMessage::system("The current user datetime is 2026-03-24 01:23:45 CET."),
+            ChatMessage::User {
+                content: UserContent::Text("what time is it?".into()),
+            },
+        ];
+
+        let (system_value, out) = to_anthropic_messages(&messages, true);
+
+        // System is returned as a content-block array with cache_control.
+        let blocks = system_value
+            .expect("system should be present")
+            .as_array()
+            .expect("should be array")
+            .clone();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(
+            blocks[0]["text"],
+            "You are a helpful assistant.\n\nThe current user datetime is 2026-03-24 01:23:45 CET."
+        );
+        assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["role"], "user");
+        assert_eq!(out[1]["role"], "user");
+    }
+
+    #[test]
+    fn system_prompt_serializes_as_content_block_array_with_cache_control() {
+        let messages = vec![
+            ChatMessage::system("You are a coding assistant."),
+            ChatMessage::User {
+                content: UserContent::Text("hi".into()),
+            },
+        ];
+
+        let (system_value, _) = to_anthropic_messages(&messages, true);
+        let blocks = system_value
+            .expect("system should be present")
+            .as_array()
+            .expect("should be array")
+            .clone();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "You are a coding assistant.");
+        assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn last_user_message_gets_cache_control() {
+        let messages = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::User {
+                content: UserContent::Text("first".into()),
+            },
+            ChatMessage::Assistant {
+                content: Some("reply".into()),
+                tool_calls: vec![],
+            },
+            ChatMessage::User {
+                content: UserContent::Text("second".into()),
+            },
+        ];
+
+        let (_, out) = to_anthropic_messages(&messages, true);
+
+        // First user message should NOT have cache_control.
+        assert_eq!(out[0]["content"], "first");
+
+        // Last user message should be converted to content-block array with cache_control.
+        let last_user = &out[2];
+        assert_eq!(last_user["role"], "user");
+        let content = last_user["content"].as_array().expect("should be array");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "second");
+        assert_eq!(content[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn multimodal_user_message_gets_cache_control_on_last_block() {
+        let messages = vec![ChatMessage::User {
+            content: UserContent::Multimodal(vec![
+                ContentPart::Text("describe this".into()),
+                ContentPart::Image {
+                    media_type: "image/png".into(),
+                    data: "base64data".into(),
+                },
+            ]),
+        }];
+
+        let (_, out) = to_anthropic_messages(&messages, true);
+        let content = out[0]["content"].as_array().expect("should be array");
+        assert_eq!(content.len(), 2);
+
+        // First block should NOT have cache_control.
+        assert!(content[0].get("cache_control").is_none());
+
+        // Last block (image) should have cache_control.
+        assert_eq!(content[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn no_system_returns_none() {
+        let messages = vec![ChatMessage::User {
+            content: UserContent::Text("hello".into()),
+        }];
+        let (system_value, _) = to_anthropic_messages(&messages, true);
+        assert!(system_value.is_none());
+    }
+
+    #[test]
+    fn caching_disabled_returns_plain_string_system() {
+        let messages = vec![ChatMessage::system("You are helpful."), ChatMessage::User {
+            content: UserContent::Text("hi".into()),
+        }];
+
+        let (system_value, out) = to_anthropic_messages(&messages, false);
+
+        // System should be a plain string, not content-block array.
+        let sys = system_value.expect("system should be present");
+        assert!(sys.is_string(), "expected string, got: {sys:?}");
+        assert_eq!(sys, "You are helpful.");
+
+        // User message should NOT have cache_control.
+        assert_eq!(out[0]["content"], "hi");
+    }
+
+    #[test]
+    fn cache_retention_none_skips_cache_control() {
+        let provider = AnthropicProvider {
+            api_key: secrecy::Secret::new("test".into()),
+            model: "claude-sonnet-4-5-20250929".into(),
+            base_url: "https://api.anthropic.com".into(),
+            client: crate::shared_http_client(),
+            alias: None,
+            reasoning_effort: None,
+            cache_retention: moltis_config::CacheRetention::None,
+        };
+        assert!(!provider.caching_enabled());
+    }
+
+    #[test]
+    fn cache_retention_short_enables_caching() {
+        let provider = AnthropicProvider::new(
+            secrecy::Secret::new("test".into()),
+            "claude-sonnet-4-5-20250929".into(),
+            "https://api.anthropic.com".into(),
+        );
+        assert!(provider.caching_enabled());
     }
 }

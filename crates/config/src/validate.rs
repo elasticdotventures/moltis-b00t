@@ -91,6 +91,7 @@ const KNOWN_PROVIDER_NAMES: &[&str] = &[
     "groq",
     "xai",
     "deepseek",
+    "fireworks",
     "mistral",
     "openrouter",
     "cerebras",
@@ -117,8 +118,10 @@ fn build_schema_map() -> KnownKeys {
             ("models", Leaf),
             ("fetch_models", Leaf),
             ("stream_transport", Leaf),
+            ("wire_api", Leaf),
             ("alias", Leaf),
             ("tool_mode", Leaf),
+            ("cache_retention", Leaf),
         ]))
     };
 
@@ -205,6 +208,7 @@ fn build_schema_map() -> KnownKeys {
             ("sandbox", sandbox()),
             ("host", Leaf),
             ("node", Leaf),
+            ("ssh_target", Leaf),
         ]))
     };
 
@@ -255,6 +259,7 @@ fn build_schema_map() -> KnownKeys {
             ("agent_timeout_secs", Leaf),
             ("agent_max_iterations", Leaf),
             ("max_tool_result_bytes", Leaf),
+            ("registry_mode", Leaf),
         ]))
     };
 
@@ -273,6 +278,7 @@ fn build_schema_map() -> KnownKeys {
             ("args", Leaf),
             ("env", Map(Box::new(Leaf))),
             ("enabled", Leaf),
+            ("request_timeout_secs", Leaf),
             ("transport", Leaf),
             ("url", Leaf),
             ("headers", Map(Box::new(Leaf))),
@@ -385,14 +391,15 @@ fn build_schema_map() -> KnownKeys {
                 ("enabled", Leaf),
                 ("search_paths", Leaf),
                 ("auto_load", Leaf),
+                ("enable_agent_sidecar_files", Leaf),
             ])),
         ),
         (
             "mcp",
-            Struct(HashMap::from([(
-                "servers",
-                Map(Box::new(mcp_server_entry())),
-            )])),
+            Struct(HashMap::from([
+                ("request_timeout_secs", Leaf),
+                ("servers", Map(Box::new(mcp_server_entry()))),
+            ])),
         ),
         ("channels", MapWithFields {
             // Dynamic keys: extra channel types via #[serde(flatten)]
@@ -1072,6 +1079,26 @@ fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut Vec<Diagnost
         });
     }
 
+    if config.mcp.request_timeout_secs == 0 {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            category: "invalid-value",
+            path: "mcp.request_timeout_secs".into(),
+            message: "mcp.request_timeout_secs must be at least 1".into(),
+        });
+    }
+
+    for (name, server) in &config.mcp.servers {
+        if server.request_timeout_secs == Some(0) {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                category: "invalid-value",
+                path: format!("mcp.servers.{name}.request_timeout_secs"),
+                message: "mcp server request_timeout_secs must be at least 1".into(),
+            });
+        }
+    }
+
     // agents.default_preset should reference an existing preset key.
     if let Some(default_preset) = config.agents.default_preset.as_deref()
         && !config.agents.presets.contains_key(default_preset)
@@ -1257,7 +1284,7 @@ fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut Vec<Diagnost
     }
 
     // Unknown exec host
-    let valid_exec_hosts = ["local", "node"];
+    let valid_exec_hosts = ["local", "node", "ssh"];
     if !valid_exec_hosts.contains(&config.tools.exec.host.as_str()) {
         diagnostics.push(Diagnostic {
             severity: Severity::Warning,
@@ -1278,6 +1305,17 @@ fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut Vec<Diagnost
             category: "unknown-field",
             path: "tools.exec.node".into(),
             message: "tools.exec.host is \"node\" but no default node is specified; commands will fail unless a node connects".into(),
+        });
+    }
+
+    if config.tools.exec.host == "ssh" && config.tools.exec.ssh_target.is_none() {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Warning,
+            category: "unknown-field",
+            path: "tools.exec.ssh_target".into(),
+            message:
+                "tools.exec.host is \"ssh\" but no SSH target is specified; commands will fail"
+                    .into(),
         });
     }
 
@@ -2004,6 +2042,38 @@ security_level = "paranoid"
     }
 
     #[test]
+    fn ssh_exec_host_accepted() {
+        let toml = r#"
+[tools.exec]
+host = "ssh"
+ssh_target = "deploy@example"
+"#;
+        let result = validate_toml_str(toml);
+        let warning = result
+            .diagnostics
+            .iter()
+            .find(|d| d.path == "tools.exec.host");
+        assert!(
+            warning.is_none(),
+            "ssh should be accepted as a valid exec host"
+        );
+    }
+
+    #[test]
+    fn ssh_exec_host_without_target_warned() {
+        let toml = r#"
+[tools.exec]
+host = "ssh"
+"#;
+        let result = validate_toml_str(toml);
+        let warning = result
+            .diagnostics
+            .iter()
+            .find(|d| d.path == "tools.exec.ssh_target");
+        assert!(warning.is_some(), "expected warning for missing ssh target");
+    }
+
+    #[test]
     fn unknown_voice_tts_list_provider_warned() {
         let toml = r#"
 [voice.tts]
@@ -2327,6 +2397,45 @@ agent_max_iterations = 0
     }
 
     #[test]
+    fn mcp_request_timeout_must_be_positive() {
+        let toml = r#"
+[mcp]
+request_timeout_secs = 0
+"#;
+        let result = validate_toml_str(toml);
+        let invalid = result.diagnostics.iter().find(|d| {
+            d.path == "mcp.request_timeout_secs"
+                && d.severity == Severity::Error
+                && d.category == "invalid-value"
+        });
+        assert!(
+            invalid.is_some(),
+            "expected mcp.request_timeout_secs invalid-value error, got: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn mcp_server_request_timeout_override_must_be_positive() {
+        let toml = r#"
+[mcp.servers.memory]
+command = "npx"
+request_timeout_secs = 0
+"#;
+        let result = validate_toml_str(toml);
+        let invalid = result.diagnostics.iter().find(|d| {
+            d.path == "mcp.servers.memory.request_timeout_secs"
+                && d.severity == Severity::Error
+                && d.category == "invalid-value"
+        });
+        assert!(
+            invalid.is_some(),
+            "expected mcp server request_timeout_secs invalid-value error, got: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
     fn channels_offered_accepted_without_warning() {
         let toml = r#"
 [channels]
@@ -2575,5 +2684,46 @@ tool_mode = "{mode}"
             "reasoning_effort should be a recognized field, got: {:?}",
             result.diagnostics
         );
+    }
+
+    #[test]
+    fn cache_retention_field_accepted_in_provider_entry() {
+        let toml = r#"
+[providers.anthropic]
+enabled = true
+cache_retention = "short"
+"#;
+        let result = validate_toml_str(toml);
+        let unknown = result
+            .diagnostics
+            .iter()
+            .find(|d| d.category == "unknown-field" && d.path.contains("cache_retention"));
+        assert!(
+            unknown.is_none(),
+            "cache_retention should be a known field, got: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn cache_retention_all_values_parse_correctly() {
+        for mode in ["none", "short", "long"] {
+            let toml = format!(
+                r#"
+[providers.anthropic]
+cache_retention = "{mode}"
+"#
+            );
+            let result = validate_toml_str(&toml);
+            let type_error = result
+                .diagnostics
+                .iter()
+                .find(|d| d.category == "type-error");
+            assert!(
+                type_error.is_none(),
+                "cache_retention = \"{mode}\" should parse without type error, got: {:?}",
+                result.diagnostics
+            );
+        }
     }
 }

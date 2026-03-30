@@ -13,7 +13,7 @@ use moltis_protocol::{
     Policy, ResponseFrame, ServerInfo, error_codes, roles, scopes,
 };
 
-use crate::{
+use moltis_gateway::{
     auth,
     broadcast::{BroadcastOpts, broadcast},
     methods::{MethodContext, MethodRegistry},
@@ -442,6 +442,9 @@ pub async fn handle_connection(
             providers: Vec::new(),
         };
         state.inner.write().await.nodes.register(node);
+        state
+            .node_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         info!(conn_id = %conn_id, node_id = %params.client.id, "node registered");
 
         // Broadcast presence change.
@@ -466,7 +469,9 @@ pub async fn handle_connection(
             let prov_state = Arc::clone(&state);
             let prov_node_id = params.client.id.clone();
             tokio::spawn(async move {
-                match crate::node_exec::query_node_providers(&prov_state, &prov_node_id).await {
+                match moltis_gateway::node_exec::query_node_providers(&prov_state, &prov_node_id)
+                    .await
+                {
                     Ok(providers) => {
                         let mut inner = prov_state.inner.write().await;
                         if let Some(n) = inner.nodes.get_mut(&prov_node_id) {
@@ -596,6 +601,9 @@ pub async fn handle_connection(
     // Unregister node if applicable.
     let removed_node = state.inner.write().await.nodes.unregister_by_conn(&conn_id);
     if let Some(node) = &removed_node {
+        state
+            .node_count
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         info!(conn_id = %conn_id, node_id = %node.node_id, "node unregistered");
         broadcast(
             &state,

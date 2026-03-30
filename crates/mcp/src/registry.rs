@@ -43,6 +43,8 @@ pub struct McpServerConfig {
     pub env: HashMap<String, String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_secs: Option<u64>,
     #[serde(default)]
     pub transport: TransportType,
     /// URL for SSE transport. Required when `transport` is `Sse`.
@@ -64,6 +66,9 @@ pub struct McpServerConfig {
     /// Manual OAuth override (skip discovery/dynamic registration).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<McpOAuthConfig>,
+    /// Custom display name for the server (shown in UI instead of technical ID).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -77,10 +82,12 @@ impl Default for McpServerConfig {
             args: Vec::new(),
             env: HashMap::new(),
             enabled: true,
+            request_timeout_secs: None,
             transport: TransportType::default(),
             url: None,
             headers: HashMap::new(),
             oauth: None,
+            display_name: None,
         }
     }
 }
@@ -272,6 +279,7 @@ mod tests {
         reg.servers.insert("fs".into(), McpServerConfig {
             command: "mcp-server-filesystem".into(),
             args: vec!["/tmp".into()],
+            request_timeout_secs: Some(45),
             ..Default::default()
         });
 
@@ -280,6 +288,7 @@ mod tests {
         assert_eq!(parsed.servers.len(), 1);
         assert_eq!(parsed.servers["fs"].command, "mcp-server-filesystem");
         assert_eq!(parsed.servers["fs"].args, vec!["/tmp"]);
+        assert_eq!(parsed.servers["fs"].request_timeout_secs, Some(45));
     }
 
     #[test]

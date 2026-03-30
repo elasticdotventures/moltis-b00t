@@ -198,15 +198,7 @@ mod tests {
     fn test_no_requirements_is_eligible() {
         let meta = SkillMetadata {
             name: "test".into(),
-            description: String::new(),
-            homepage: None,
-            license: None,
-            compatibility: None,
-            allowed_tools: Vec::new(),
-            dockerfile: None,
-            requires: SkillRequirements::default(),
-            path: Default::default(),
-            source: None,
+            ..Default::default()
         };
         let elig = check_requirements(&meta);
         assert!(elig.eligible);
@@ -217,19 +209,12 @@ mod tests {
     fn test_missing_bin_is_blocked() {
         let meta = SkillMetadata {
             name: "test".into(),
-            description: String::new(),
-            homepage: None,
-            license: None,
-            compatibility: None,
-            allowed_tools: Vec::new(),
-            dockerfile: None,
             requires: SkillRequirements {
                 bins: vec!["__nonexistent_binary_xyz__".into()],
                 any_bins: Vec::new(),
                 install: Vec::new(),
             },
-            path: Default::default(),
-            source: None,
+            ..Default::default()
         };
         let elig = check_requirements(&meta);
         assert!(!elig.eligible);
@@ -240,19 +225,12 @@ mod tests {
     fn test_any_bins_one_present() {
         let meta = SkillMetadata {
             name: "test".into(),
-            description: String::new(),
-            homepage: None,
-            license: None,
-            compatibility: None,
-            allowed_tools: Vec::new(),
-            dockerfile: None,
             requires: SkillRequirements {
                 bins: Vec::new(),
                 any_bins: vec!["ls".into(), "__nonexistent__".into()],
                 install: Vec::new(),
             },
-            path: Default::default(),
-            source: None,
+            ..Default::default()
         };
         #[cfg(unix)]
         {
@@ -265,19 +243,12 @@ mod tests {
     fn test_any_bins_none_present() {
         let meta = SkillMetadata {
             name: "test".into(),
-            description: String::new(),
-            homepage: None,
-            license: None,
-            compatibility: None,
-            allowed_tools: Vec::new(),
-            dockerfile: None,
             requires: SkillRequirements {
                 bins: Vec::new(),
                 any_bins: vec!["__nope1__".into(), "__nope2__".into()],
                 install: Vec::new(),
             },
-            path: Default::default(),
-            source: None,
+            ..Default::default()
         };
         let elig = check_requirements(&meta);
         assert!(!elig.eligible);
@@ -288,12 +259,6 @@ mod tests {
     fn test_install_options_filtered_by_os() {
         let meta = SkillMetadata {
             name: "test".into(),
-            description: String::new(),
-            homepage: None,
-            license: None,
-            compatibility: None,
-            allowed_tools: Vec::new(),
-            dockerfile: None,
             requires: SkillRequirements {
                 bins: vec!["__missing__".into()],
                 any_bins: Vec::new(),
@@ -330,8 +295,7 @@ mod tests {
                     },
                 ],
             },
-            path: Default::default(),
-            source: None,
+            ..Default::default()
         };
         let elig = check_requirements(&meta);
         assert!(!elig.eligible);

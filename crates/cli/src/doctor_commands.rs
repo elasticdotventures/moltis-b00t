@@ -13,6 +13,7 @@ use {
         validate::{self, Severity},
     },
     secrecy::ExposeSecret,
+    tokio::process::Command,
 };
 
 // ── ANSI helpers ────────────────────────────────────────────────────────────
@@ -165,6 +166,9 @@ pub async fn handle_doctor() -> Result<()> {
 
     // 7. MCP server health
     sections.push(check_mcp_servers(&config));
+
+    // 8. Remote execution readiness
+    sections.push(check_remote_exec(&config, &data_dir).await);
 
     let (errors, warnings) = print_report(&sections);
 
@@ -555,7 +559,7 @@ fn check_tls(config: &MoltisConfig) -> Section {
 
     // Auto-generated certs
     if config.tls.auto_generate {
-        match moltis_gateway::tls::cert_dir() {
+        match moltis_httpd::tls::cert_dir() {
             Ok(cert_dir) => {
                 let ca_path = cert_dir.join("ca.pem");
                 let server_cert = cert_dir.join("server.pem");
@@ -680,6 +684,308 @@ fn check_mcp_servers(config: &MoltisConfig) -> Section {
                 },
             }
         }
+    }
+
+    section
+}
+
+struct RemoteExecInventory {
+    managed_key_count: i64,
+    encrypted_key_count: i64,
+    managed_target_count: i64,
+    pinned_target_count: i64,
+    default_target_label: Option<String>,
+    default_target_auth_mode: Option<String>,
+    default_target_is_pinned: bool,
+}
+
+async fn detect_ssh_version() -> Option<String> {
+    let output = Command::new("ssh").arg("-V").output().await.ok()?;
+    let text = if output.stdout.is_empty() {
+        String::from_utf8_lossy(&output.stderr).trim().to_string()
+    } else {
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    (!text.is_empty()).then_some(text)
+}
+
+async fn read_remote_exec_inventory(data_dir: &Path) -> Result<Option<RemoteExecInventory>> {
+    let db_path = data_dir.join("moltis.db");
+    if !db_path.exists() {
+        return Ok(None);
+    }
+
+    let db_url = format!("sqlite:{}?mode=ro", db_path.display());
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&db_url)
+        .await?;
+
+    let ssh_keys_exists = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = 'ssh_keys'",
+    )
+    .fetch_one(&pool)
+    .await?
+        > 0;
+    let ssh_targets_exists = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = 'ssh_targets'",
+    )
+    .fetch_one(&pool)
+    .await?
+        > 0;
+
+    if !ssh_keys_exists && !ssh_targets_exists {
+        pool.close().await;
+        return Ok(Some(RemoteExecInventory {
+            managed_key_count: 0,
+            encrypted_key_count: 0,
+            managed_target_count: 0,
+            pinned_target_count: 0,
+            default_target_label: None,
+            default_target_auth_mode: None,
+            default_target_is_pinned: false,
+        }));
+    }
+
+    let ssh_targets_has_known_host = if ssh_targets_exists {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(1) FROM pragma_table_info('ssh_targets') WHERE name = 'known_host'",
+        )
+        .fetch_one(&pool)
+        .await?
+            > 0
+    } else {
+        false
+    };
+
+    let managed_key_count = if ssh_keys_exists {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(1) FROM ssh_keys")
+            .fetch_one(&pool)
+            .await?
+    } else {
+        0
+    };
+    let encrypted_key_count = if ssh_keys_exists {
+        sqlx::query_scalar::<_, i64>("SELECT COALESCE(SUM(encrypted), 0) FROM ssh_keys")
+            .fetch_one(&pool)
+            .await?
+    } else {
+        0
+    };
+
+    let (
+        managed_target_count,
+        pinned_target_count,
+        default_target_label,
+        default_target_auth_mode,
+        default_target_is_pinned,
+    ) = if ssh_targets_exists && ssh_targets_has_known_host {
+        let row = sqlx::query_as::<_, (i64, i64, Option<String>, Option<String>, i64)>(
+                "SELECT
+                    (SELECT COUNT(1) FROM ssh_targets),
+                    (SELECT COUNT(1) FROM ssh_targets WHERE known_host IS NOT NULL AND TRIM(known_host) <> ''),
+                    (SELECT label FROM ssh_targets WHERE is_default = 1 ORDER BY updated_at DESC, id DESC LIMIT 1),
+                    (SELECT auth_mode FROM ssh_targets WHERE is_default = 1 ORDER BY updated_at DESC, id DESC LIMIT 1),
+                    COALESCE((SELECT CASE WHEN known_host IS NOT NULL AND TRIM(known_host) <> '' THEN 1 ELSE 0 END FROM ssh_targets WHERE is_default = 1 ORDER BY updated_at DESC, id DESC LIMIT 1), 0)",
+            )
+            .fetch_one(&pool)
+            .await?;
+        (row.0, row.1, row.2, row.3, row.4 != 0)
+    } else if ssh_targets_exists {
+        let row = sqlx::query_as::<_, (i64, Option<String>, Option<String>)>(
+                "SELECT
+                    (SELECT COUNT(1) FROM ssh_targets),
+                    (SELECT label FROM ssh_targets WHERE is_default = 1 ORDER BY updated_at DESC, id DESC LIMIT 1),
+                    (SELECT auth_mode FROM ssh_targets WHERE is_default = 1 ORDER BY updated_at DESC, id DESC LIMIT 1)",
+            )
+            .fetch_one(&pool)
+            .await?;
+        (row.0, 0, row.1, row.2, false)
+    } else {
+        (0, 0, None, None, false)
+    };
+
+    pool.close().await;
+
+    Ok(Some(RemoteExecInventory {
+        managed_key_count,
+        encrypted_key_count,
+        managed_target_count,
+        pinned_target_count,
+        default_target_label,
+        default_target_auth_mode,
+        default_target_is_pinned,
+    }))
+}
+
+async fn check_remote_exec(config: &MoltisConfig, data_dir: &Path) -> Section {
+    let mut section = Section::new("Remote Execution");
+    let exec_host = config.tools.exec.host.trim();
+    let ssh_binary_path = which::which("ssh").ok();
+    let ssh_version = if ssh_binary_path.is_some() {
+        detect_ssh_version().await
+    } else {
+        None
+    };
+    let configured_node = config
+        .tools
+        .exec
+        .node
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let legacy_target = config
+        .tools
+        .exec
+        .ssh_target
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    section.push(Status::Ok, match exec_host {
+        "ssh" => "Backend mode: ssh",
+        "node" => "Backend mode: node",
+        _ => "Backend mode: local",
+    });
+
+    match ssh_binary_path {
+        Some(path) => {
+            if let Some(version) = ssh_version {
+                section.push(
+                    Status::Ok,
+                    format!("SSH client found at {} ({version})", path.display()),
+                );
+            } else {
+                section.push(
+                    Status::Ok,
+                    format!("SSH client found at {}", path.display()),
+                );
+            }
+        },
+        None => {
+            let status = if exec_host == "ssh" {
+                Status::Fail
+            } else {
+                Status::Warn
+            };
+            section.push(
+                status,
+                "SSH client not found in PATH, SSH targets will not work".to_string(),
+            );
+        },
+    }
+
+    let inventory = match read_remote_exec_inventory(data_dir).await {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            section.push(
+                Status::Fail,
+                format!("Failed to read managed SSH inventory from moltis.db: {error}"),
+            );
+            return section;
+        },
+    };
+
+    if let Some(inventory) = inventory {
+        section.push(
+            Status::Info,
+            format!(
+                "Managed SSH inventory: {} key(s), {} target(s), {} pinned target(s), {} encrypted key(s)",
+                inventory.managed_key_count,
+                inventory.managed_target_count,
+                inventory.pinned_target_count,
+                inventory.encrypted_key_count
+            ),
+        );
+        if let Some(default_label) = inventory.default_target_label.as_deref() {
+            let auth_mode = inventory
+                .default_target_auth_mode
+                .as_deref()
+                .unwrap_or("unknown");
+            section.push(
+                Status::Info,
+                format!(
+                    "Default managed target: {default_label} ({auth_mode}, {})",
+                    if inventory.default_target_is_pinned {
+                        "host pinned"
+                    } else {
+                        "inherits known_hosts policy"
+                    }
+                ),
+            );
+        }
+
+        if exec_host == "ssh" && legacy_target.is_none() && inventory.default_target_label.is_none()
+        {
+            section.push(
+                Status::Fail,
+                "SSH backend is active, but there is no default managed target and no legacy ssh_target configured".to_string(),
+            );
+        } else if exec_host == "ssh"
+            && inventory.default_target_label.is_some()
+            && !inventory.default_target_is_pinned
+        {
+            section.push(
+                Status::Warn,
+                "Active managed SSH route is not host-pinned, paste a known_hosts line in Settings → SSH".to_string(),
+            );
+        }
+    } else {
+        section.push(
+            Status::Skip,
+            "moltis.db not found, managed SSH inventory unavailable",
+        );
+    }
+
+    if let Some(target) = legacy_target {
+        let status = if exec_host == "ssh" {
+            Status::Warn
+        } else {
+            Status::Info
+        };
+        section.push(
+            status,
+            format!(
+                "Legacy ssh_target is configured as '{target}', move it into Settings → SSH if you want named targets, host pinning, and managed keys"
+            ),
+        );
+    }
+
+    match exec_host {
+        "node" => {
+            if let Some(node) = configured_node {
+                section.push(
+                    Status::Info,
+                    format!("Default paired-node preference: {node}"),
+                );
+            } else {
+                section.push(
+                    Status::Warn,
+                    "Node backend is active, but tools.exec.node is not set. Session picks or runtime routing will decide.".to_string(),
+                );
+            }
+            section.push(
+                Status::Info,
+                "Live paired-node presence and active-route tests are available from the Nodes page when the gateway is running".to_string(),
+            );
+        },
+        "ssh" => {
+            if configured_node.is_some() {
+                section.push(
+                    Status::Info,
+                    "tools.exec.node is set but ignored while the SSH backend is active"
+                        .to_string(),
+                );
+            }
+        },
+        _ => {
+            if legacy_target.is_some() || configured_node.is_some() {
+                section.push(
+                    Status::Info,
+                    "Remote targets are configured, but local execution remains the default until you switch tools.exec.host or pick a route in chat".to_string(),
+                );
+            }
+        },
     }
 
     section
@@ -865,6 +1171,8 @@ mod tests {
             transport: String::new(),
             url: None,
             oauth: None,
+            display_name: None,
+            request_timeout_secs: None,
         };
         config.mcp.servers.insert("test".to_string(), entry);
 
@@ -886,6 +1194,8 @@ mod tests {
             transport: String::new(),
             url: None,
             oauth: None,
+            display_name: None,
+            request_timeout_secs: None,
         };
         config.mcp.servers.insert("broken".to_string(), entry);
 
@@ -907,6 +1217,8 @@ mod tests {
             transport: "sse".to_string(),
             url: Some("http://localhost:3000/sse".to_string()),
             oauth: None,
+            display_name: None,
+            request_timeout_secs: None,
         };
         config.mcp.servers.insert("remote".to_string(), entry);
 
@@ -928,6 +1240,8 @@ mod tests {
             transport: "sse".to_string(),
             url: None,
             oauth: None,
+            display_name: None,
+            request_timeout_secs: None,
         };
         config.mcp.servers.insert("broken-sse".to_string(), entry);
 
@@ -952,6 +1266,8 @@ mod tests {
             transport: String::new(),
             url: None,
             oauth: None,
+            display_name: None,
+            request_timeout_secs: None,
         };
         config.mcp.servers.insert("bad".to_string(), entry);
 
@@ -1032,6 +1348,136 @@ mod tests {
                 .map(|i| (&i.status, &i.message))
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[tokio::test]
+    async fn read_remote_exec_inventory_reports_pinned_defaults() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db_path = temp.path().join("moltis.db");
+        let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE ssh_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                private_key TEXT NOT NULL,
+                public_key TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                encrypted INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE ssh_targets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                label TEXT NOT NULL UNIQUE,
+                target TEXT NOT NULL,
+                port INTEGER,
+                known_host TEXT,
+                auth_mode TEXT NOT NULL DEFAULT 'system',
+                key_id INTEGER,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ssh_keys (name, private_key, public_key, fingerprint, encrypted)
+             VALUES ('prod-key', 'PRIVATE', 'ssh-ed25519 AAAA...', 'SHA256:test', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ssh_targets (label, target, known_host, auth_mode, key_id, is_default)
+             VALUES ('prod', 'deploy@example.com', 'prod.example.com ssh-ed25519 AAAA...', 'managed', 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let inventory = read_remote_exec_inventory(temp.path())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inventory.managed_key_count, 1);
+        assert_eq!(inventory.encrypted_key_count, 1);
+        assert_eq!(inventory.managed_target_count, 1);
+        assert_eq!(inventory.pinned_target_count, 1);
+        assert_eq!(inventory.default_target_label.as_deref(), Some("prod"));
+        assert!(inventory.default_target_is_pinned);
+    }
+
+    #[tokio::test]
+    async fn check_remote_exec_warns_for_unpinned_active_target() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db_path = temp.path().join("moltis.db");
+        let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE ssh_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                private_key TEXT NOT NULL,
+                public_key TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                encrypted INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE ssh_targets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                label TEXT NOT NULL UNIQUE,
+                target TEXT NOT NULL,
+                port INTEGER,
+                known_host TEXT,
+                auth_mode TEXT NOT NULL DEFAULT 'system',
+                key_id INTEGER,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ssh_targets (label, target, auth_mode, is_default)
+             VALUES ('prod', 'deploy@example.com', 'system', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let mut config = MoltisConfig::default();
+        config.tools.exec.host = "ssh".to_string();
+        let section = check_remote_exec(&config, temp.path()).await;
+        assert!(section.items.iter().any(|item| {
+            item.status == Status::Warn && item.message.contains("not host-pinned")
+        }));
     }
 
     #[test]

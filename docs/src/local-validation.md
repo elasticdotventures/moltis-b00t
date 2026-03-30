@@ -44,6 +44,10 @@ checks in the PR.
   changes). Commit or stash local changes before running.
 - On macOS without CUDA (`nvcc`), the script automatically falls back to
   non-CUDA test/coverage defaults for local runs.
+- On Linux, `local/lint` and `local/test` use `--all-features`. If you want
+  the opt-in Vulkan path covered locally, install the Vulkan development
+  packages first, for example `libvulkan-dev` and `glslang-tools` on Debian/Ubuntu
+  (on Ubuntu 22.04, install `glslang-tools` from the LunarG Vulkan SDK).
 - `local/lint` uses the same clippy flags as CI and release:
   `cargo +nightly-2025-11-30 clippy -Z unstable-options --workspace --all-features --all-targets --timings -- -D warnings`.
 - `zizmor` is installed automatically (Homebrew on macOS, apt on Linux) when

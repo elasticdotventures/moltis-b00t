@@ -9,6 +9,7 @@ import { completeProviderOAuth, startProviderOAuth } from "./provider-oauth.js";
 import {
 	humanizeProbeError,
 	isModelServiceNotConfigured,
+	isTimeoutError,
 	saveProviderKey,
 	testModel,
 	validateProviderKey,
@@ -823,9 +824,17 @@ function saveAndFinishProvider(provider, keyVal, endpointVal, modelVal, selected
 				var modelForTest = saveAsCustomProvider ? `${savedProviderName}::${modelForStorage}` : selectedModelId;
 				var testResult = await testModel(modelForTest);
 				var modelServiceUnavailable = !testResult.ok && isModelServiceNotConfigured(testResult.error || "");
-				if (!(testResult.ok || modelServiceUnavailable)) {
+				var modelTimedOut = !testResult.ok && isTimeoutError(testResult.error || "");
+				if (!(testResult.ok || modelServiceUnavailable || modelTimedOut)) {
 					showError(testResult.error || "Model test failed. Try another model.");
 					return;
+				}
+				if (modelTimedOut) {
+					console.warn(
+						"models.test timed out for",
+						modelForTest,
+						"— saving model anyway (local servers may need longer to load)",
+					);
 				}
 				await sendRpc("providers.save_model", { provider: savedProviderName, model: modelForStorage });
 				if (modelServiceUnavailable) {
@@ -840,9 +849,15 @@ function saveAndFinishProvider(provider, keyVal, endpointVal, modelVal, selected
 			status.className = "provider-status";
 			status.textContent = `${successDisplayName} configured successfully!`;
 			m.body.appendChild(status);
+			if (modelTimedOut) {
+				var slowHint = document.createElement("div");
+				slowHint.className = "text-xs text-[var(--muted)] mt-1";
+				slowHint.textContent = "Note: model was slow to respond. It may need a moment to finish loading.";
+				m.body.appendChild(slowHint);
+			}
 			fetchModels();
 			if (S.refreshProvidersPage) S.refreshProvidersPage();
-			setTimeout(closeProviderModal, 1500);
+			setTimeout(closeProviderModal, modelTimedOut ? 3500 : 1500);
 		})
 		.catch((err) => {
 			showError(err?.message || "Failed to save credentials.");
@@ -1124,6 +1139,9 @@ function showMultiModelSelector(providerName, providerDisplayName, models, saved
 			if (isModelServiceNotConfigured(result.error || "")) {
 				// Model service not ready — don't flag as broken.
 				probeResults.delete(modelId);
+			} else if (!result.ok && isTimeoutError(result.error || "")) {
+				// Timeout — model may still work, local servers need time to load.
+				probeResults.set(modelId, { error: "Slow to respond (may still work)", timeout: true });
 			} else {
 				probeResults.set(modelId, result.ok ? "ok" : { error: humanizeProbeError(result.error || "Unsupported") });
 			}
@@ -1225,8 +1243,8 @@ function showMultiModelSelector(providerName, providerDisplayName, models, saved
 				badges.appendChild(probeBadge);
 			} else if (probe && probe !== "ok") {
 				var unsupBadge = document.createElement("span");
-				unsupBadge.className = "provider-item-badge warning";
-				unsupBadge.textContent = "Unsupported";
+				unsupBadge.className = probe.timeout ? "tier-badge" : "provider-item-badge warning";
+				unsupBadge.textContent = probe.timeout ? "Slow" : "Unsupported";
 				unsupBadge.title = probe.error || "";
 				badges.appendChild(unsupBadge);
 			}

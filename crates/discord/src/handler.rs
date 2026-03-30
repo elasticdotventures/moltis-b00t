@@ -385,6 +385,7 @@ impl EventHandler for Handler {
             account_id: self.account_id.clone(),
             chat_id: chat_id.clone(),
             message_id: Some(msg.id.to_string()),
+            thread_id: None,
         };
 
         let Some(sink) = event_sink else {

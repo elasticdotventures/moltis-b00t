@@ -598,6 +598,7 @@ pub struct StreamingToolState {
 }
 
 /// Result of processing a single SSE line.
+#[derive(Debug)]
 pub enum SseLineResult {
     /// No actionable event (empty line, non-data prefix)
     Skip,
@@ -944,12 +945,12 @@ pub struct ResponsesStreamState {
 /// Returns [`SseLineResult`] indicating whether to skip, yield events, or stop.
 ///
 /// Handles the event types emitted by the Responses API:
-/// - `response.output_text.delta` → text delta
-/// - `response.output_item.added` (type=function_call) → tool call start
-/// - `response.function_call_arguments.delta` → tool call arguments delta
-/// - `response.function_call_arguments.done` → tool call complete
+/// - `response.output_text.delta` → text delta + `ProviderRaw`
+/// - `response.output_item.added` (type=function_call) → tool call start + `ProviderRaw`
+/// - `response.function_call_arguments.delta` → tool call arguments delta + `ProviderRaw`
+/// - `response.function_call_arguments.done` → tool call complete + `ProviderRaw`
 /// - `response.completed` → parse usage, done
-/// - `error` / `response.failed` → error
+/// - `error` / `response.failed` → error + `ProviderRaw`
 pub fn process_responses_sse_line(data: &str, state: &mut ResponsesStreamState) -> SseLineResult {
     if data == "[DONE]" {
         return SseLineResult::Done;
@@ -959,14 +960,17 @@ pub fn process_responses_sse_line(data: &str, state: &mut ResponsesStreamState) 
         return SseLineResult::Skip;
     };
 
+    // Emit ProviderRaw for every parsed event, mirroring the Chat Completions path.
+    let raw = StreamEvent::ProviderRaw(evt.clone());
+
     match evt["type"].as_str().unwrap_or("") {
         "response.output_text.delta" => {
             if let Some(delta) = evt["delta"].as_str()
                 && !delta.is_empty()
             {
-                SseLineResult::Events(vec![StreamEvent::Delta(delta.to_string())])
+                SseLineResult::Events(vec![raw, StreamEvent::Delta(delta.to_string())])
             } else {
-                SseLineResult::Skip
+                SseLineResult::Events(vec![raw])
             }
         },
         "response.output_item.added" => {
@@ -976,9 +980,9 @@ pub fn process_responses_sse_line(data: &str, state: &mut ResponsesStreamState) 
                 let index = responses_output_index(&evt, state.current_tool_index);
                 state.current_tool_index = state.current_tool_index.max(index + 1);
                 state.tool_calls.insert(index, (id.clone(), name.clone()));
-                SseLineResult::Events(vec![StreamEvent::ToolCallStart { id, name, index }])
+                SseLineResult::Events(vec![raw, StreamEvent::ToolCallStart { id, name, index }])
             } else {
-                SseLineResult::Skip
+                SseLineResult::Events(vec![raw])
             }
         },
         "response.function_call_arguments.delta" => {
@@ -987,20 +991,20 @@ pub fn process_responses_sse_line(data: &str, state: &mut ResponsesStreamState) 
             {
                 let index =
                     responses_output_index(&evt, state.current_tool_index.saturating_sub(1));
-                SseLineResult::Events(vec![StreamEvent::ToolCallArgumentsDelta {
+                SseLineResult::Events(vec![raw, StreamEvent::ToolCallArgumentsDelta {
                     index,
                     delta: delta.to_string(),
                 }])
             } else {
-                SseLineResult::Skip
+                SseLineResult::Events(vec![raw])
             }
         },
         "response.function_call_arguments.done" => {
             let index = responses_output_index(&evt, state.current_tool_index.saturating_sub(1));
             if state.completed_tool_calls.insert(index) {
-                SseLineResult::Events(vec![StreamEvent::ToolCallComplete { index }])
+                SseLineResult::Events(vec![raw, StreamEvent::ToolCallComplete { index }])
             } else {
-                SseLineResult::Skip
+                SseLineResult::Events(vec![raw])
             }
         },
         "response.completed" => {
@@ -1022,9 +1026,9 @@ pub fn process_responses_sse_line(data: &str, state: &mut ResponsesStreamState) 
                 .or_else(|| evt["response"]["error"]["message"].as_str())
                 .or_else(|| evt["message"].as_str())
                 .unwrap_or("unknown error");
-            SseLineResult::Events(vec![StreamEvent::Error(msg.to_string())])
+            SseLineResult::Events(vec![raw, StreamEvent::Error(msg.to_string())])
         },
-        _ => SseLineResult::Skip,
+        _ => SseLineResult::Events(vec![raw]),
     }
 }
 
@@ -2376,7 +2380,7 @@ mod tests {
     }
 
     // ============================================================
-    // Tests for process_responses_sse_line
+    // Tests for process_responses_sse_line (with ProviderRaw)
     // ============================================================
 
     #[test]
@@ -2404,21 +2408,25 @@ mod tests {
         let result = process_responses_sse_line(data, &mut state);
         match result {
             SseLineResult::Events(events) => {
-                assert_eq!(events.len(), 1);
-                assert!(matches!(&events[0], StreamEvent::Delta(s) if s == "Hello"));
+                assert_eq!(events.len(), 2);
+                assert!(matches!(&events[0], StreamEvent::ProviderRaw(_)));
+                assert!(matches!(&events[1], StreamEvent::Delta(s) if s == "Hello"));
             },
             _ => panic!("Expected Events"),
         }
     }
 
     #[test]
-    fn test_responses_sse_empty_delta_skipped() {
+    fn test_responses_sse_empty_delta_emits_only_raw() {
         let mut state = ResponsesStreamState::default();
         let data = r#"{"type":"response.output_text.delta","delta":""}"#;
-        assert!(matches!(
-            process_responses_sse_line(data, &mut state),
-            SseLineResult::Skip
-        ));
+        match process_responses_sse_line(data, &mut state) {
+            SseLineResult::Events(events) => {
+                assert_eq!(events.len(), 1);
+                assert!(matches!(&events[0], StreamEvent::ProviderRaw(_)));
+            },
+            other => panic!("expected Events with only ProviderRaw, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2428,9 +2436,10 @@ mod tests {
         let result = process_responses_sse_line(data, &mut state);
         match result {
             SseLineResult::Events(events) => {
-                assert_eq!(events.len(), 1);
+                assert_eq!(events.len(), 2);
+                assert!(matches!(&events[0], StreamEvent::ProviderRaw(_)));
                 assert!(matches!(
-                    &events[0],
+                    &events[1],
                     StreamEvent::ToolCallStart { id, name, index }
                     if id == "call_1" && name == "read_file" && *index == 0
                 ));
@@ -2452,9 +2461,10 @@ mod tests {
         let result = process_responses_sse_line(data, &mut state);
         match result {
             SseLineResult::Events(events) => {
-                assert_eq!(events.len(), 1);
+                assert_eq!(events.len(), 2);
+                assert!(matches!(&events[0], StreamEvent::ProviderRaw(_)));
                 assert!(matches!(
-                    &events[0],
+                    &events[1],
                     StreamEvent::ToolCallArgumentsDelta { index, delta }
                     if *index == 0 && delta == "{\"path\":"
                 ));
@@ -2473,8 +2483,9 @@ mod tests {
         let result = process_responses_sse_line(data, &mut state);
         match result {
             SseLineResult::Events(events) => {
-                assert_eq!(events.len(), 1);
-                assert!(matches!(&events[0], StreamEvent::ToolCallComplete {
+                assert_eq!(events.len(), 2);
+                assert!(matches!(&events[0], StreamEvent::ProviderRaw(_)));
+                assert!(matches!(&events[1], StreamEvent::ToolCallComplete {
                     index: 0
                 }));
             },
@@ -2490,12 +2501,15 @@ mod tests {
         state.current_tool_index = 1;
         state.completed_tool_calls.insert(0);
 
-        // Second "done" for same index should be skipped
+        // Second "done" for same index should emit only ProviderRaw
         let data = r#"{"type":"response.function_call_arguments.done","output_index":0}"#;
-        assert!(matches!(
-            process_responses_sse_line(data, &mut state),
-            SseLineResult::Skip
-        ));
+        match process_responses_sse_line(data, &mut state) {
+            SseLineResult::Events(events) => {
+                assert_eq!(events.len(), 1);
+                assert!(matches!(&events[0], StreamEvent::ProviderRaw(_)));
+            },
+            other => panic!("expected Events with only ProviderRaw, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2515,8 +2529,9 @@ mod tests {
         let result = process_responses_sse_line(data, &mut state);
         match result {
             SseLineResult::Events(events) => {
-                assert_eq!(events.len(), 1);
-                assert!(matches!(&events[0], StreamEvent::Error(msg) if msg == "rate limited"));
+                assert_eq!(events.len(), 2);
+                assert!(matches!(&events[0], StreamEvent::ProviderRaw(_)));
+                assert!(matches!(&events[1], StreamEvent::Error(msg) if msg == "rate limited"));
             },
             _ => panic!("Expected Events"),
         }
@@ -2530,21 +2545,25 @@ mod tests {
         let result = process_responses_sse_line(data, &mut state);
         match result {
             SseLineResult::Events(events) => {
-                assert_eq!(events.len(), 1);
-                assert!(matches!(&events[0], StreamEvent::Error(msg) if msg == "model overloaded"));
+                assert_eq!(events.len(), 2);
+                assert!(matches!(&events[0], StreamEvent::ProviderRaw(_)));
+                assert!(matches!(&events[1], StreamEvent::Error(msg) if msg == "model overloaded"));
             },
             _ => panic!("Expected Events"),
         }
     }
 
     #[test]
-    fn test_responses_sse_unknown_type_skipped() {
+    fn test_responses_sse_unknown_type_emits_only_raw() {
         let mut state = ResponsesStreamState::default();
         let data = r#"{"type":"response.created"}"#;
-        assert!(matches!(
-            process_responses_sse_line(data, &mut state),
-            SseLineResult::Skip
-        ));
+        match process_responses_sse_line(data, &mut state) {
+            SseLineResult::Events(events) => {
+                assert_eq!(events.len(), 1);
+                assert!(matches!(&events[0], StreamEvent::ProviderRaw(_)));
+            },
+            other => panic!("expected Events with only ProviderRaw, got {other:?}"),
+        }
     }
 
     // ============================================================

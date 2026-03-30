@@ -3,7 +3,7 @@
 export default {
 	title: "Repositories",
 	description:
-		"Projects bind sessions to a codebase directory. When a session is linked to a project, context files (CLAUDE.md, AGENTS.md) are loaded automatically and a custom system prompt can be injected. Enable auto-worktree to give each session its own git branch for isolated work.",
+		"Projects bind sessions to a codebase directory. When a session is linked to a project, context files (CLAUDE.md, AGENTS.md, .cursorrules, and rule directories) are loaded automatically, scanned for risky prompt-injection patterns, and injected into the system prompt. Enable auto-worktree to give each session its own git branch for isolated work.",
 	autoDetectDescription:
 		'<strong class="text-[var(--text)]">Auto-detect</strong> scans common directories under your home folder (<code class="font-mono text-xs">~/Projects</code>, <code class="font-mono text-xs">~/Developer</code>, <code class="font-mono text-xs">~/src</code>, <code class="font-mono text-xs">~/code</code>, <code class="font-mono text-xs">~/repos</code>, <code class="font-mono text-xs">~/workspace</code>, <code class="font-mono text-xs">~/dev</code>, <code class="font-mono text-xs">~/git</code>) and Superset worktrees (<code class="font-mono text-xs">~/.superset/worktrees</code>) for git repositories and adds them as projects.',
 	clearAllHint: "Clear All only removes repository entries from Moltis, it does not delete anything from disk.",

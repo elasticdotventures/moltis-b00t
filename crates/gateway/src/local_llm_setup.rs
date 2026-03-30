@@ -960,6 +960,55 @@ fn insufficient_ram_error(
     )
 }
 
+fn gguf_acceleration_labels(sys: &local_gguf::system_info::SystemInfo) -> Vec<&'static str> {
+    let mut labels = Vec::new();
+    if sys.has_metal {
+        labels.push("Metal");
+    }
+    if sys.has_cuda {
+        labels.push("CUDA");
+    }
+    if sys.has_vulkan {
+        labels.push("Vulkan");
+    }
+    labels
+}
+
+fn gguf_acceleration_name(sys: &local_gguf::system_info::SystemInfo) -> Option<String> {
+    let labels = gguf_acceleration_labels(sys);
+    if labels.is_empty() {
+        None
+    } else {
+        Some(labels.join("/"))
+    }
+}
+
+fn gguf_backend_description(sys: &local_gguf::system_info::SystemInfo) -> String {
+    match gguf_acceleration_name(sys) {
+        Some(acceleration) => format!("Cross-platform, {acceleration} GPU acceleration"),
+        None if sys.has_gpu() => "Cross-platform, GPU acceleration".to_string(),
+        None => "Cross-platform, CPU inference".to_string(),
+    }
+}
+
+fn gguf_backend_note(sys: &local_gguf::system_info::SystemInfo, mlx_available: bool) -> String {
+    if mlx_available {
+        return "MLX recommended (native Apple Silicon optimization)".to_string();
+    }
+
+    let gguf_note = match gguf_acceleration_name(sys) {
+        Some(acceleration) => format!("GGUF with {acceleration} acceleration"),
+        None if sys.has_gpu() => "GGUF with GPU acceleration".to_string(),
+        None => "GGUF (CPU inference)".to_string(),
+    };
+
+    if sys.is_apple_silicon {
+        format!("{gguf_note} (install mlx-lm for native MLX)")
+    } else {
+        gguf_note
+    }
+}
+
 #[async_trait]
 impl LocalLlmService for LiveLocalLlmService {
     async fn system_info(&self) -> ServiceResult {
@@ -988,13 +1037,7 @@ impl LocalLlmService for LiveLocalLlmService {
         let mut available_backends = vec![serde_json::json!({
             "id": "GGUF",
             "name": "GGUF (llama.cpp)",
-            "description": if sys.is_apple_silicon {
-                "Cross-platform, Metal GPU acceleration"
-            } else if sys.has_cuda {
-                "Cross-platform, CUDA GPU acceleration"
-            } else {
-                "Cross-platform, CPU inference"
-            },
+            "description": gguf_backend_description(&sys),
             "available": true,
         })];
 
@@ -1015,27 +1058,28 @@ impl LocalLlmService for LiveLocalLlmService {
         }
 
         // Build backend note for display
-        let backend_note = if mlx_available {
-            "MLX recommended (native Apple Silicon optimization)"
-        } else if sys.is_apple_silicon {
-            "GGUF with Metal (install mlx-lm for native MLX)"
-        } else if sys.has_cuda {
-            "GGUF with CUDA acceleration"
-        } else {
-            "GGUF (CPU inference)"
-        };
+        let backend_note = gguf_backend_note(&sys, mlx_available);
 
         Ok(serde_json::json!({
             "totalRamGb": sys.total_ram_gb(),
             "availableRamGb": sys.available_ram_gb(),
             "hasMetal": sys.has_metal,
             "hasCuda": sys.has_cuda,
+            "hasVulkan": sys.has_vulkan,
             "hasGpu": sys.has_gpu(),
             "isAppleSilicon": sys.is_apple_silicon,
             "memoryTier": tier.to_string(),
             "recommendedBackend": recommended_backend,
             "availableBackends": available_backends,
             "backendNote": backend_note,
+            "ggufDevices": sys.gguf_devices.iter().map(|device| serde_json::json!({
+                "index": device.index,
+                "name": device.name,
+                "description": device.description,
+                "backend": device.backend,
+                "memoryTotalBytes": device.memory_total_bytes,
+                "memoryFreeBytes": device.memory_free_bytes,
+            })).collect::<Vec<_>>(),
             "mlxAvailable": mlx_available,
         }))
     }
@@ -1681,6 +1725,18 @@ mod tests {
 
     use super::*;
 
+    fn sample_system_info() -> local_gguf::system_info::SystemInfo {
+        local_gguf::system_info::SystemInfo {
+            total_ram_bytes: 16 * 1024 * 1024 * 1024,
+            available_ram_bytes: 8 * 1024 * 1024 * 1024,
+            gguf_devices: vec![],
+            has_metal: false,
+            has_cuda: false,
+            has_vulkan: false,
+            is_apple_silicon: false,
+        }
+    }
+
     fn local_model_config_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
@@ -1704,7 +1760,6 @@ mod tests {
             moltis_config::clear_data_dir();
         }
     }
-
     #[test]
     fn test_local_llm_config_serialization() {
         let mut config = LocalLlmConfig::default();
@@ -1834,6 +1889,69 @@ mod tests {
         let message = insufficient_ram_error("Qwen 2.5 Coder 7B", 8, 0);
         assert!(message.contains("requires at least 8GB"));
         assert!(message.contains("detected 0GB"));
+    }
+
+    #[test]
+    fn test_gguf_backend_description_uses_vulkan() {
+        let mut sys = sample_system_info();
+        sys.has_vulkan = true;
+        assert_eq!(
+            gguf_backend_description(&sys),
+            "Cross-platform, Vulkan GPU acceleration"
+        );
+    }
+
+    #[test]
+    fn test_gguf_backend_note_uses_multiple_accelerators() {
+        let mut sys = sample_system_info();
+        sys.has_cuda = true;
+        sys.has_vulkan = true;
+        assert_eq!(
+            gguf_backend_note(&sys, false),
+            "GGUF with CUDA/Vulkan acceleration"
+        );
+    }
+
+    #[test]
+    fn test_gguf_backend_note_keeps_apple_mlx_hint() {
+        let mut sys = sample_system_info();
+        sys.is_apple_silicon = true;
+        sys.has_metal = true;
+        assert_eq!(
+            gguf_backend_note(&sys, false),
+            "GGUF with Metal acceleration (install mlx-lm for native MLX)"
+        );
+    }
+
+    #[test]
+    fn test_gguf_backend_description_unknown_gpu_uses_generic_label() {
+        let mut sys = sample_system_info();
+        sys.gguf_devices = vec![local_gguf::runtime_devices::GgufRuntimeDevice {
+            index: 0,
+            name: "ROCm0".into(),
+            description: "AMD".into(),
+            backend: "ROCm".into(),
+            memory_total_bytes: 1,
+            memory_free_bytes: 1,
+        }];
+        assert_eq!(
+            gguf_backend_description(&sys),
+            "Cross-platform, GPU acceleration"
+        );
+    }
+
+    #[test]
+    fn test_gguf_backend_note_unknown_gpu_uses_generic_label() {
+        let mut sys = sample_system_info();
+        sys.gguf_devices = vec![local_gguf::runtime_devices::GgufRuntimeDevice {
+            index: 0,
+            name: "ROCm0".into(),
+            description: "AMD".into(),
+            backend: "ROCm".into(),
+            memory_total_bytes: 1,
+            memory_free_bytes: 1,
+        }];
+        assert_eq!(gguf_backend_note(&sys, false), "GGUF with GPU acceleration");
     }
 
     #[test]

@@ -8,3 +8,7 @@ pub const VERSION: &str = match option_env!("MOLTIS_VERSION") {
     Some(v) => v,
     None => env!("CARGO_PKG_VERSION"),
 };
+
+/// `true` when built without an explicit `MOLTIS_VERSION`, i.e. a local dev
+/// build from source. Used to suppress the update banner for developers.
+pub const IS_DEV_BUILD: bool = option_env!("MOLTIS_VERSION").is_none();

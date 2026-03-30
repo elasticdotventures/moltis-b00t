@@ -53,6 +53,7 @@ export default {
 	header: {
 		memoryTooltip: "Process memory · System free memory",
 		settings: "Settings",
+		changelog: "Changelog",
 		reportIssue: "Report issue",
 		reportIssueTitle: "Report an issue",
 		themeLight: "Light theme",

@@ -172,6 +172,9 @@ rm -f "$release_section_tmp"
 cargo fetch
 cargo fetch --locked
 
+# Rebuild changelog HTML for the website
+node website/scripts/build-changelog.mjs
+
 echo "Release prep complete:"
 echo "  version: $new_version"
 echo "  date:    $release_date"

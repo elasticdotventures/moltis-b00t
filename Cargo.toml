@@ -17,6 +17,7 @@ default-members = [
   "crates/discord",
   "crates/gateway",
   "crates/graphql",
+  "crates/httpd",
   "crates/mcp",
   "crates/media",
   "crates/memory",
@@ -69,6 +70,7 @@ members = [
   "crates/cron",
   "crates/gateway",
   "crates/graphql",
+  "crates/httpd",
   "crates/mcp",
   "crates/media",
   "crates/memory",
@@ -235,7 +237,9 @@ metrics                     = "0.24"
 metrics-exporter-prometheus = "0.16"
 metrics-tracing-context     = "0.16"
 # Content processing
+html2text      = "0.16"
 image          = { default-features = false, features = ["jpeg", "png", "webp"], version = "0.25" }
+mime_guess     = "2"
 ipnet          = "2"
 mdns-sd        = "0.18"
 pulldown-cmark = { default-features = false, version = "0.12" }
@@ -302,6 +306,7 @@ moltis-cron            = { path = "crates/cron" }
 moltis-discord         = { path = "crates/discord" }
 moltis-gateway         = { default-features = false, path = "crates/gateway" }
 moltis-graphql         = { path = "crates/graphql" }
+moltis-httpd           = { default-features = false, path = "crates/httpd" }
 moltis-mcp             = { path = "crates/mcp" }
 moltis-media           = { path = "crates/media" }
 moltis-memory          = { path = "crates/memory" }
@@ -339,3 +344,6 @@ codegen-units = 1
 lto           = "thin"
 panic         = "abort"
 strip         = true
+
+[profile.dev]
+debug = "line-tables-only"

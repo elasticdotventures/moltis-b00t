@@ -11,7 +11,11 @@ pub use moltis_service_traits::*;
 use {
     async_trait::async_trait,
     serde_json::Value,
-    std::{collections::HashSet, path::Path, sync::Arc},
+    std::{
+        collections::HashSet,
+        path::{Path, PathBuf},
+        sync::Arc,
+    },
 };
 
 fn security_audit(event: &str, details: Value) {
@@ -305,6 +309,9 @@ impl SkillsService for NoopSkillsService {
                     "repo_name": repo.repo_name,
                     "installed_at_ms": repo.installed_at_ms,
                     "commit_sha": repo.commit_sha,
+                    "quarantined": repo.quarantined,
+                    "quarantine_reason": repo.quarantine_reason,
+                    "provenance": repo.provenance,
                     "drifted": drifted_sources.contains(&repo.source),
                     "format": format,
                     "skill_count": repo.skills.len(),
@@ -448,6 +455,9 @@ impl SkillsService for NoopSkillsService {
                     "repo_name": repo.repo_name,
                     "installed_at_ms": repo.installed_at_ms,
                     "commit_sha": repo.commit_sha,
+                    "quarantined": repo.quarantined,
+                    "quarantine_reason": repo.quarantine_reason,
+                    "provenance": repo.provenance,
                     "drifted": drifted_sources.contains(&repo.source),
                     "format": format,
                     "skills": skills,
@@ -515,6 +525,102 @@ impl SkillsService for NoopSkillsService {
         );
 
         Ok(serde_json::json!({ "removed": source }))
+    }
+
+    async fn repos_export(&self, params: Value) -> ServiceResult {
+        let source = params
+            .get("source")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'source' parameter".to_string())?;
+        let output_path = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from);
+        let install_dir =
+            moltis_skills::install::default_install_dir().map_err(ServiceError::message)?;
+        let exported = moltis_skills::portability::export_repo_bundle(
+            source,
+            &install_dir,
+            output_path.as_deref(),
+        )
+        .await
+        .map_err(ServiceError::message)?;
+
+        security_audit(
+            "skills.repos.export",
+            serde_json::json!({
+                "source": source,
+                "path": exported.bundle_path,
+            }),
+        );
+
+        Ok(serde_json::json!({
+            "source": exported.repo.source,
+            "repo_name": exported.repo.repo_name,
+            "path": exported.bundle_path,
+        }))
+    }
+
+    async fn repos_import(&self, params: Value) -> ServiceResult {
+        let bundle_path = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'path' parameter".to_string())?;
+        let install_dir =
+            moltis_skills::install::default_install_dir().map_err(ServiceError::message)?;
+        let imported =
+            moltis_skills::portability::import_repo_bundle(Path::new(bundle_path), &install_dir)
+                .await
+                .map_err(ServiceError::message)?;
+
+        security_audit(
+            "skills.repos.import",
+            serde_json::json!({
+                "source": imported.source,
+                "repo_name": imported.repo_name,
+                "path": imported.bundle_path,
+                "skill_count": imported.skills.len(),
+            }),
+        );
+
+        Ok(serde_json::json!({
+            "source": imported.source,
+            "repo_name": imported.repo_name,
+            "format": imported.format,
+            "path": imported.bundle_path,
+            "quarantined": true,
+            "skill_count": imported.skills.len(),
+            "skills": imported.skills.iter().map(|skill| serde_json::json!({
+                "name": skill.name,
+                "description": skill.description,
+                "path": skill.path.to_string_lossy(),
+            })).collect::<Vec<_>>(),
+        }))
+    }
+
+    async fn repos_unquarantine(&self, params: Value) -> ServiceResult {
+        let source = params
+            .get("source")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'source' parameter".to_string())?;
+
+        let manifest_path = moltis_skills::manifest::ManifestStore::default_path()
+            .map_err(ServiceError::message)?;
+        let store = moltis_skills::manifest::ManifestStore::new(manifest_path);
+        let mut manifest = store.load().map_err(ServiceError::message)?;
+        let repo = manifest
+            .find_repo_mut(source)
+            .ok_or_else(|| format!("repo '{source}' not found"))?;
+        repo.quarantined = false;
+        repo.quarantine_reason = None;
+        store.save(&manifest).map_err(ServiceError::message)?;
+
+        security_audit(
+            "skills.repos.unquarantine",
+            serde_json::json!({ "source": source }),
+        );
+
+        Ok(serde_json::json!({ "source": source, "quarantined": false }))
     }
 
     async fn emergency_disable(&self) -> ServiceResult {
@@ -660,6 +766,9 @@ impl SkillsService for NoopSkillsService {
                     "install_options": elig.install_options,
                     "trusted": skill_state.trusted,
                     "enabled": skill_state.enabled,
+                    "quarantined": repo.quarantined,
+                    "quarantine_reason": repo.quarantine_reason,
+                    "provenance": repo.provenance,
                     "drifted": drifted_sources.contains(source),
                     "commit_sha": commit_sha,
                     "commit_url": commit_url,
@@ -705,6 +814,9 @@ impl SkillsService for NoopSkillsService {
                     "install_options": empty,
                     "trusted": skill_state.trusted,
                     "enabled": skill_state.enabled,
+                    "quarantined": repo.quarantined,
+                    "quarantine_reason": repo.quarantine_reason,
+                    "provenance": repo.provenance,
                     "drifted": drifted_sources.contains(source),
                     "commit_sha": commit_sha,
                     "commit_url": commit_url,
@@ -839,6 +951,67 @@ impl SkillsService for NoopSkillsService {
             )
             .into())
         }
+    }
+
+    async fn skill_save(&self, params: Value) -> ServiceResult {
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'name' parameter".to_string())?;
+        let description = params
+            .get("description")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'description' parameter".to_string())?;
+        let body = params
+            .get("body")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'body' parameter".to_string())?;
+        let allowed_tools: Vec<String> = params
+            .get("allowed_tools")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if !moltis_skills::parse::validate_name(name) {
+            return Err(format!(
+                "invalid skill name '{name}': must be 1-64 lowercase alphanumeric/hyphen chars"
+            )
+            .into());
+        }
+
+        let skills_dir = moltis_config::data_dir().join("skills");
+        let skill_dir = skills_dir.join(name);
+
+        // Build SKILL.md content.
+        let mut content = format!("---\nname: {name}\ndescription: {description}\n");
+        if !allowed_tools.is_empty() {
+            content.push_str("allowed_tools:\n");
+            for tool in &allowed_tools {
+                content.push_str(&format!("  - {tool}\n"));
+            }
+        }
+        content.push_str("---\n\n");
+        content.push_str(body);
+        if !body.ends_with('\n') {
+            content.push('\n');
+        }
+
+        std::fs::create_dir_all(&skill_dir)
+            .map_err(|e| format!("failed to create skill directory: {e}"))?;
+        std::fs::write(skill_dir.join("SKILL.md"), &content)
+            .map_err(|e| format!("failed to write SKILL.md: {e}"))?;
+
+        // Determine if this was a create or update for the response.
+        Ok(serde_json::json!({
+            "saved": true,
+            "name": name,
+            "source": "personal",
+            "path": skill_dir.to_string_lossy(),
+        }))
     }
 
     async fn security_status(&self) -> ServiceResult {
@@ -1041,6 +1214,17 @@ fn toggle_skill(params: &Value, enabled: bool) -> ServiceResult {
     }
 
     if enabled {
+        let quarantined = manifest
+            .find_repo(source)
+            .map(|repo| repo.quarantined)
+            .ok_or_else(|| format!("repo '{source}' not found"))?;
+        if quarantined {
+            return Err(format!(
+                "repo '{source}' is quarantined. Review it and run skills.repos.unquarantine before enabling"
+            )
+            .into());
+        }
+
         if drifted_sources.contains(source) {
             return Err(format!(
                 "skill '{skill_name}' source changed since it was last trusted. Review and run skills.skill.trust before enabling"
@@ -1419,20 +1603,24 @@ impl GatewayServices {
         self
     }
 
-    /// Create a [`Services`] bundle for sharing with the GraphQL schema.
+    /// Create a [`Services`] bundle with an injected `chat` and `system_info`.
     ///
-    /// Clones all service `Arc`s (cheap pointer bumps) into the shared bundle.
-    /// The `system_info` service is provided separately because it needs the
-    /// fully-constructed `GatewayState` which isn't available during
+    /// Clones all other service `Arc`s (cheap pointer bumps) into the shared
+    /// bundle. The `system_info` service is provided separately because it
+    /// needs the fully-constructed `GatewayState` which isn't available during
     /// `GatewayServices` construction.
-    pub fn to_services(&self, system_info: Arc<dyn SystemInfoService>) -> Arc<Services> {
+    pub fn to_services_with_chat(
+        &self,
+        system_info: Arc<dyn SystemInfoService>,
+        chat: Arc<dyn ChatService>,
+    ) -> Arc<Services> {
         Arc::new(Services {
             agent: self.agent.clone(),
             session: self.session.clone(),
             channel: self.channel.clone(),
             config: self.config.clone(),
             cron: self.cron.clone(),
-            chat: self.chat.clone(),
+            chat,
             tts: self.tts.clone(),
             stt: self.stt.clone(),
             skills: self.skills.clone(),
@@ -1451,6 +1639,10 @@ impl GatewayServices {
             local_llm: self.local_llm.clone(),
             system_info,
         })
+    }
+
+    pub fn to_services(&self, system_info: Arc<dyn SystemInfoService>) -> Arc<Services> {
+        self.to_services_with_chat(system_info, self.chat.clone())
     }
 }
 

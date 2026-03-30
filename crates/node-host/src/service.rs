@@ -197,7 +197,7 @@ fn launchd_plist_path() -> anyhow::Result<PathBuf> {
         .join(format!("{LAUNCHD_LABEL}.plist")))
 }
 
-/// Escape a string for safe inclusion in XML text content.
+/// Escape special XML characters for safe interpolation into plist values.
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -206,10 +206,6 @@ fn xml_escape(s: &str) -> String {
 }
 
 /// Generate a launchd plist XML string.
-///
-/// `node run` reads connection parameters (gateway URL, device token, etc.)
-/// from `~/.moltis/node.json` at runtime, so only `--timeout` is passed as
-/// a CLI flag here.
 pub fn generate_launchd_plist(
     moltis_bin: &Path,
     config: &ServiceConfig,
@@ -218,13 +214,30 @@ pub fn generate_launchd_plist(
     let bin = xml_escape(&moltis_bin.display().to_string());
     let log = xml_escape(&log_path.display().to_string());
 
-    let args = [
+    let mut args = vec![
         format!("    <string>{bin}</string>"),
         "    <string>node</string>".to_string(),
         "    <string>run</string>".to_string(),
-        "    <string>--timeout</string>".to_string(),
+        format!("    <string>--host</string>"),
+        format!("    <string>{}</string>", xml_escape(&config.gateway_url)),
+        format!("    <string>--token</string>"),
+        format!("    <string>{}</string>", xml_escape(&config.device_token)),
+        format!("    <string>--timeout</string>"),
         format!("    <string>{}</string>", config.timeout),
     ];
+
+    if let Some(ref id) = config.node_id {
+        args.push("    <string>--node-id</string>".to_string());
+        args.push(format!("    <string>{}</string>", xml_escape(id)));
+    }
+    if let Some(ref name) = config.display_name {
+        args.push("    <string>--name</string>".to_string());
+        args.push(format!("    <string>{}</string>", xml_escape(name)));
+    }
+    if let Some(ref dir) = config.working_dir {
+        args.push("    <string>--working-dir</string>".to_string());
+        args.push(format!("    <string>{}</string>", xml_escape(dir)));
+    }
 
     let args_str = args.join("\n");
 
@@ -409,9 +422,22 @@ pub fn generate_systemd_unit(moltis_bin: &Path, config: &ServiceConfig, log_path
     let bin = moltis_bin.display();
     let log = log_path.display();
 
-    // `moltis node run` reads connection details from node.json; only
-    // `--timeout` is accepted as a CLI override.
-    let exec_args = format!("{bin} node run --timeout {}", config.timeout);
+    let mut exec_args = format!(
+        "{bin} node run --host \"{}\" --token \"{}\" --timeout {}",
+        config.gateway_url.replace('"', "\\\""),
+        config.device_token.replace('"', "\\\""),
+        config.timeout,
+    );
+
+    if let Some(ref id) = config.node_id {
+        exec_args.push_str(&format!(" --node-id \"{}\"", id.replace('"', "\\\"")));
+    }
+    if let Some(ref name) = config.display_name {
+        exec_args.push_str(&format!(" --name \"{}\"", name.replace('"', "\\\"")));
+    }
+    if let Some(ref dir) = config.working_dir {
+        exec_args.push_str(&format!(" --working-dir \"{}\"", dir.replace('"', "\\\"")));
+    }
 
     format!(
         r#"[Unit]
@@ -638,37 +664,38 @@ mod tests {
 
         assert!(plist.contains("org.moltis.node"));
         assert!(plist.contains("/usr/local/bin/moltis"));
-        // `node run` reads gateway_url, device_token, etc. from node.json
-        // at runtime — only --timeout is passed as a CLI flag.
-        assert!(plist.contains("--timeout"));
+        assert!(plist.contains("ws://gw:9090/ws"));
+        assert!(plist.contains("tok_test"));
+        assert!(plist.contains("node-42"));
+        assert!(plist.contains("Test Node"));
+        assert!(plist.contains("/home/user"));
         assert!(plist.contains("120"));
         assert!(plist.contains("<key>RunAtLoad</key>"));
         assert!(plist.contains("<key>KeepAlive</key>"));
         assert!(plist.contains("/tmp/node.log"));
+        // Verify it's valid-ish XML.
         assert!(plist.starts_with("<?xml"));
         assert!(plist.contains("</plist>"));
-        // Config fields should NOT appear as CLI args.
-        assert!(!plist.contains("--gateway-url"));
-        assert!(!plist.contains("--device-token"));
     }
 
     #[test]
-    fn launchd_plist_escapes_xml_special_chars() {
+    fn launchd_plist_omits_optional_fields() {
         let bin = PathBuf::from("/usr/local/bin/moltis");
         let config = ServiceConfig {
             gateway_url: "ws://gw:9090/ws".into(),
-            device_token: "tok".into(),
+            device_token: "tok_test".into(),
             node_id: None,
             display_name: None,
             working_dir: None,
             timeout: 300,
         };
-        let log = PathBuf::from("/tmp/a&b<c>.log");
+        let log = PathBuf::from("/tmp/node.log");
 
         let plist = generate_launchd_plist(&bin, &config, &log);
 
-        assert!(plist.contains("a&amp;b&lt;c&gt;.log"));
-        assert!(!plist.contains("a&b<c>"));
+        assert!(!plist.contains("--node-id"));
+        assert!(!plist.contains("--name"));
+        assert!(!plist.contains("--working-dir"));
     }
 
     #[test]
@@ -690,35 +717,34 @@ mod tests {
         assert!(unit.contains("[Service]"));
         assert!(unit.contains("[Install]"));
         assert!(unit.contains("network-online.target"));
-        assert!(unit.contains("/usr/bin/moltis node run --timeout 600"));
+        assert!(unit.contains("/usr/bin/moltis node run"));
+        assert!(unit.contains("--host \"ws://gw:9090/ws\""));
+        assert!(unit.contains("--token \"tok_sys\""));
+        assert!(unit.contains("--node-id \"sys-node\""));
+        assert!(unit.contains("--name \"Server\""));
+        assert!(unit.contains("--working-dir \"/srv\""));
+        assert!(unit.contains("--timeout 600"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("RestartSec=10"));
         assert!(unit.contains("/var/log/moltis/node.log"));
         assert!(unit.contains("WantedBy=default.target"));
-        // Config fields should NOT appear as CLI args.
-        assert!(!unit.contains("--gateway-url"));
-        assert!(!unit.contains("--device-token"));
     }
 
     #[test]
-    fn systemd_unit_only_passes_timeout_flag() {
+    fn systemd_unit_omits_optional_fields() {
         let bin = PathBuf::from("/usr/bin/moltis");
         let config = ServiceConfig {
             gateway_url: "ws://gw:9090/ws".into(),
             device_token: "tok_min".into(),
-            node_id: Some("node-1".into()),
-            display_name: Some("Test".into()),
-            working_dir: Some("/srv".into()),
+            node_id: None,
+            display_name: None,
+            working_dir: None,
             timeout: 300,
         };
         let log = PathBuf::from("/tmp/node.log");
 
         let unit = generate_systemd_unit(&bin, &config, &log);
 
-        // Only --timeout should appear; connection details are in node.json.
-        assert!(unit.contains("--timeout 300"));
-        assert!(!unit.contains("--gateway-url"));
-        assert!(!unit.contains("--device-token"));
         assert!(!unit.contains("--node-id"));
         assert!(!unit.contains("--name"));
         assert!(!unit.contains("--working-dir"));

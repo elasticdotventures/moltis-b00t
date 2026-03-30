@@ -183,6 +183,14 @@ type ConfigQuery {
 type ContextFile {
 	path: String
 	content: String
+	kind: String
+	warnings: [ContextWarning!]
+}
+
+type ContextWarning {
+	code: String
+	severity: String
+	message: String
 }
 
 type CronJob {
@@ -502,6 +510,7 @@ type McpServer {
 	transport: String
 	url: String
 	toolCount: Int
+	displayName: String
 }
 
 type McpTool {

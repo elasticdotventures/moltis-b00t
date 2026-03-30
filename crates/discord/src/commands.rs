@@ -102,6 +102,7 @@ async fn handle_slash_command(
         account_id: account_id.to_string(),
         chat_id: command.channel_id.to_string(),
         message_id: None,
+        thread_id: None,
     };
 
     let response_text = match sink.dispatch_command(&command.data.name, reply_to).await {
@@ -154,6 +155,7 @@ async fn handle_component_interaction(
         account_id: account_id.to_string(),
         chat_id: component.channel_id.to_string(),
         message_id: None,
+        thread_id: None,
     };
 
     match sink.dispatch_interaction(callback_data, reply_to).await {

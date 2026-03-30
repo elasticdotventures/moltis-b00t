@@ -192,6 +192,7 @@ async fn build_recent_sessions_snapshot(gw: &GatewayState, limit: usize) -> Vec<
                         target.channel_type.as_str(),
                         &target.account_id,
                         &target.chat_id,
+                        target.thread_id.as_deref(),
                     )
                     .await
                     .map(|key| key == entry.key)

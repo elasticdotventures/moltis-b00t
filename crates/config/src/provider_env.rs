@@ -91,6 +91,7 @@ pub fn normalize_provider_name(value: &str) -> Option<String> {
         "grok" => "xai",
         "local" => "local-llm",
         "z-ai" | "z.ai" | "zhipu" | "zhipu-ai" => "zai",
+        "zai-code" | "zai-coding" | "zhipu-code" => "zai-code",
         other => other,
     };
 
@@ -144,6 +145,17 @@ mod tests {
             panic!("generic provider env should resolve");
         };
         assert_eq!(resolved.provider, "gemini");
+    }
+
+    #[test]
+    fn normalize_zai_code_aliases() {
+        for alias in &["zai-code", "zai-coding", "zhipu-code"] {
+            assert_eq!(
+                normalize_provider_name(alias).as_deref(),
+                Some("zai-code"),
+                "expected alias {alias:?} to normalize to \"zai-code\""
+            );
+        }
     }
 
     #[test]

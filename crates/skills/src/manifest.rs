@@ -73,6 +73,9 @@ mod tests {
             installed_at_ms: 1234567890,
             commit_sha: Some("abc123".into()),
             format: Default::default(),
+            quarantined: false,
+            quarantine_reason: None,
+            provenance: None,
             skills: vec![SkillState {
                 name: "my-skill".into(),
                 relative_path: "skills/my-skill".into(),
@@ -98,6 +101,9 @@ mod tests {
             installed_at_ms: 0,
             commit_sha: None,
             format: Default::default(),
+            quarantined: false,
+            quarantine_reason: None,
+            provenance: None,
             skills: vec![
                 SkillState {
                     name: "s1".into(),
@@ -133,6 +139,9 @@ mod tests {
             installed_at_ms: 0,
             commit_sha: None,
             format: Default::default(),
+            quarantined: false,
+            quarantine_reason: None,
+            provenance: None,
             skills: vec![SkillState {
                 name: "s1".into(),
                 relative_path: "s1".into(),
@@ -155,6 +164,9 @@ mod tests {
             installed_at_ms: 0,
             commit_sha: None,
             format: Default::default(),
+            quarantined: false,
+            quarantine_reason: None,
+            provenance: None,
             skills: vec![],
         });
         m.add_repo(RepoEntry {
@@ -163,6 +175,9 @@ mod tests {
             installed_at_ms: 0,
             commit_sha: None,
             format: Default::default(),
+            quarantined: false,
+            quarantine_reason: None,
+            provenance: None,
             skills: vec![],
         });
 

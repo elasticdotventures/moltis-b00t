@@ -5,8 +5,9 @@ use {
         config_view::ChannelConfigView,
         gating::{DmPolicy, GroupPolicy, MentionMode},
     },
-    secrecy::{ExposeSecret, Secret},
-    serde::{Deserialize, Serialize},
+    moltis_common::secret_serde,
+    secrecy::Secret,
+    serde::{Deserialize, Serialize, ser::SerializeStruct},
 };
 
 /// Per-channel model/provider override.
@@ -56,12 +57,12 @@ pub enum StreamMode {
 #[serde(default)]
 pub struct SlackAccountConfig {
     /// Bot user OAuth token (`xoxb-...`).
-    #[serde(serialize_with = "serialize_secret")]
+    #[serde(serialize_with = "secret_serde::serialize_secret")]
     pub bot_token: Secret<String>,
 
     /// App-level token for Socket Mode (`xapp-...`).
     /// Required when `connection_mode` is `socket_mode`.
-    #[serde(serialize_with = "serialize_secret")]
+    #[serde(serialize_with = "secret_serde::serialize_secret")]
     pub app_token: Secret<String>,
 
     /// How this account connects to Slack.
@@ -72,7 +73,7 @@ pub struct SlackAccountConfig {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_secret"
+        serialize_with = "secret_serde::serialize_option_secret"
     )]
     pub signing_secret: Option<Secret<String>>,
 
@@ -218,26 +219,54 @@ impl ChannelConfigView for SlackAccountConfig {
     }
 }
 
-fn serialize_secret<S: serde::Serializer>(
-    secret: &Secret<String>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(secret.expose_secret())
-}
+/// Wrapper that serializes secret fields as `"[REDACTED]"` for API responses.
+pub struct RedactedConfig<'a>(pub &'a SlackAccountConfig);
 
-fn serialize_optional_secret<S: serde::Serializer>(
-    secret: &Option<Secret<String>>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    match secret {
-        Some(s) => serializer.serialize_str(s.expose_secret()),
-        None => serializer.serialize_none(),
+impl Serialize for RedactedConfig<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let c = self.0;
+        let mut count = 11; // always-present fields
+        count += c.signing_secret.is_some() as usize;
+        count += c.model.is_some() as usize;
+        count += c.model_provider.is_some() as usize;
+        count += !c.channel_overrides.is_empty() as usize;
+        count += !c.user_overrides.is_empty() as usize;
+        let mut s = serializer.serialize_struct("SlackAccountConfig", count)?;
+        s.serialize_field("bot_token", secret_serde::REDACTED)?;
+        s.serialize_field("app_token", secret_serde::REDACTED)?;
+        s.serialize_field("connection_mode", &c.connection_mode)?;
+        if c.signing_secret.is_some() {
+            s.serialize_field("signing_secret", secret_serde::REDACTED)?;
+        }
+        s.serialize_field("dm_policy", &c.dm_policy)?;
+        s.serialize_field("group_policy", &c.group_policy)?;
+        s.serialize_field("mention_mode", &c.mention_mode)?;
+        s.serialize_field("allowlist", &c.allowlist)?;
+        s.serialize_field("channel_allowlist", &c.channel_allowlist)?;
+        if c.model.is_some() {
+            s.serialize_field("model", &c.model)?;
+        }
+        if c.model_provider.is_some() {
+            s.serialize_field("model_provider", &c.model_provider)?;
+        }
+        s.serialize_field("stream_mode", &c.stream_mode)?;
+        s.serialize_field("edit_throttle_ms", &c.edit_throttle_ms)?;
+        s.serialize_field("thread_replies", &c.thread_replies)?;
+        if !c.channel_overrides.is_empty() {
+            s.serialize_field("channel_overrides", &c.channel_overrides)?;
+        }
+        if !c.user_overrides.is_empty() {
+            s.serialize_field("user_overrides", &c.user_overrides)?;
+        }
+        s.end()
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use secrecy::ExposeSecret;
+
     use super::*;
 
     #[test]
@@ -363,6 +392,37 @@ mod tests {
             cfg2.signing_secret.as_ref().unwrap().expose_secret(),
             "abc123secret"
         );
+    }
+
+    #[test]
+    fn redacted_hides_all_secrets() {
+        let cfg = SlackAccountConfig {
+            bot_token: Secret::new("xoxb-secret".into()),
+            app_token: Secret::new("xapp-secret".into()),
+            signing_secret: Some(Secret::new("sign-secret".into())),
+            model: Some("gpt-4o".into()),
+            ..Default::default()
+        };
+        let redacted = serde_json::to_value(RedactedConfig(&cfg)).unwrap();
+        assert_eq!(redacted["bot_token"], "[REDACTED]");
+        assert_eq!(redacted["app_token"], "[REDACTED]");
+        assert_eq!(redacted["signing_secret"], "[REDACTED]");
+        // Non-secret fields preserved
+        assert_eq!(redacted["model"], "gpt-4o");
+        assert!(redacted["thread_replies"].is_boolean());
+
+        // Storage path still exposes secrets
+        let storage = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(storage["bot_token"], "xoxb-secret");
+        assert_eq!(storage["app_token"], "xapp-secret");
+        assert_eq!(storage["signing_secret"], "sign-secret");
+    }
+
+    #[test]
+    fn redacted_omits_none_signing_secret() {
+        let cfg = SlackAccountConfig::default();
+        let redacted = serde_json::to_value(RedactedConfig(&cfg)).unwrap();
+        assert!(redacted.get("signing_secret").is_none());
     }
 
     #[test]

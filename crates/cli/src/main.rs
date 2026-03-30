@@ -214,6 +214,19 @@ enum SkillAction {
         /// Source in owner/repo format.
         source: String,
     },
+    /// Export an installed repo as a portable bundle.
+    Export {
+        /// Source in owner/repo format.
+        source: String,
+        /// Output file or directory. Defaults to ~/.moltis/skill-exports/.
+        #[arg(long)]
+        output: Option<String>,
+    },
+    /// Import a portable skill bundle into the local registry in quarantine.
+    Import {
+        /// Path to a .tar.gz bundle created by `moltis skills export`.
+        path: String,
+    },
     /// Show details about a skill.
     Info {
         /// Skill name.
@@ -268,7 +281,7 @@ fn init_telemetry(cli: &Cli, log_buffer: Option<LogBuffer>) {
 
 #[cfg(feature = "tls")]
 async fn trust_ca() -> anyhow::Result<()> {
-    let cert_dir = moltis_gateway::tls::cert_dir()?;
+    let cert_dir = moltis_httpd::tls::cert_dir()?;
     let ca_path = cert_dir.join("ca.pem");
 
     if !ca_path.exists() {
@@ -405,22 +418,19 @@ async fn main() -> anyhow::Result<()> {
             let no_tls = false;
 
             #[cfg(feature = "tailscale")]
-            let tailscale_opts = cli
-                .tailscale
-                .map(|mode| moltis_gateway::server::TailscaleOpts {
-                    mode,
-                    reset_on_exit: cli.tailscale_reset_on_exit,
-                });
+            let tailscale_opts = cli.tailscale.map(|mode| moltis_httpd::TailscaleOpts {
+                mode,
+                reset_on_exit: cli.tailscale_reset_on_exit,
+            });
             #[cfg(not(feature = "tailscale"))]
             let tailscale_opts: Option<()> = None;
             let _ = &tailscale_opts; // suppress unused warning when feature disabled
             #[cfg(feature = "web-ui")]
-            let extra_routes: Option<moltis_gateway::server::RouteEnhancer> =
-                Some(moltis_web::web_routes);
+            let extra_routes: Option<moltis_httpd::RouteEnhancer> = Some(moltis_web::web_routes);
             #[cfg(not(feature = "web-ui"))]
-            let extra_routes: Option<moltis_gateway::server::RouteEnhancer> = None;
+            let extra_routes: Option<moltis_httpd::RouteEnhancer> = None;
 
-            moltis_gateway::server::start_gateway(
+            moltis_httpd::start_gateway(
                 &bind,
                 port,
                 no_tls,
@@ -505,6 +515,34 @@ async fn handle_skills(action: SkillAction) -> anyhow::Result<()> {
             let install_dir = install::default_install_dir()?;
             install::remove_repo(&source, &install_dir).await?;
             println!("Removed repo '{source}' and all its skills.");
+        },
+        SkillAction::Export { source, output } => {
+            let install_dir = install::default_install_dir()?;
+            let exported = moltis_skills::portability::export_repo_bundle(
+                &source,
+                &install_dir,
+                output.as_deref().map(std::path::Path::new),
+            )
+            .await?;
+            println!(
+                "Exported repo '{}' to {}",
+                exported.repo.source,
+                exported.bundle_path.display()
+            );
+        },
+        SkillAction::Import { path } => {
+            let install_dir = install::default_install_dir()?;
+            let imported = moltis_skills::portability::import_repo_bundle(
+                std::path::Path::new(&path),
+                &install_dir,
+            )
+            .await?;
+            println!(
+                "Imported repo '{}' as '{}' ({} skills, quarantined)",
+                imported.source,
+                imported.repo_name,
+                imported.skills.len()
+            );
         },
         SkillAction::Info { name } => {
             let registry = InMemoryRegistry::from_discoverer(&discoverer).await?;

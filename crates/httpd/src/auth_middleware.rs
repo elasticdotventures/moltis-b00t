@@ -14,15 +14,18 @@ use axum::{
 #[cfg(feature = "web-ui")]
 use tracing::{debug, warn};
 
-use crate::{
+use moltis_gateway::{
     auth::{AuthIdentity, AuthMethod, CredentialStore},
-    server::is_local_connection,
     state::GatewayState,
 };
 
+use crate::server::is_local_connection;
+
 /// Session cookie name.
 pub const SESSION_COOKIE: &str = "moltis_session";
+#[cfg(feature = "web-ui")]
 const AUTH_SETUP_REQUIRED: &str = "AUTH_SETUP_REQUIRED";
+#[cfg(feature = "web-ui")]
 const AUTH_NOT_AUTHENTICATED: &str = "AUTH_NOT_AUTHENTICATED";
 
 // ── AuthResult — single source of truth for auth decisions ──────────────────
@@ -240,11 +243,29 @@ fn is_onboarding_bypass_path(path: &str) -> bool {
 
 // ── Vault guard ─────────────────────────────────────────────────────────────
 
-/// Middleware that blocks API requests when the vault is sealed.
+/// Whether an API path should bypass the sealed-vault guard.
 ///
-/// Returns 423 Locked for API endpoints (except auth and gon) when the vault
-/// is in `Sealed` state. `Uninitialized` is not blocked — the vault doesn't
-/// exist yet and there's nothing to protect.
+/// Session history/media and bootstrap payloads are not currently encrypted by
+/// the vault, so they remain accessible while sealed. This keeps the UI honest
+/// about what is actually protected today. If per-session encryption lands,
+/// narrow the `/api/sessions/*` exemption to only the remaining unencrypted
+/// sub-paths instead of blindly allowing the whole tree.
+#[cfg(feature = "vault")]
+fn is_vault_guard_exempt_path(path: &str) -> bool {
+    path.starts_with("/api/auth/")
+        || path.starts_with("/api/public/")
+        || path == "/api/gon"
+        || path == "/api/bootstrap"
+        || path == "/api/sessions"
+        || path.starts_with("/api/sessions/")
+}
+
+/// Middleware that blocks vault-protected API requests when the vault is
+/// sealed.
+///
+/// Returns 423 Locked for encrypted API surfaces when the vault is in
+/// `Sealed` state. `Uninitialized` is not blocked because there's nothing to
+/// protect yet.
 #[cfg(feature = "vault")]
 pub async fn vault_guard(
     State(state): State<super::server::AppState>,
@@ -255,12 +276,8 @@ pub async fn vault_guard(
         return next.run(request).await;
     };
     let path = request.uri().path();
-    // Allow auth, public, gon, and non-API routes through.
-    if !path.starts_with("/api/")
-        || path.starts_with("/api/auth/")
-        || path.starts_with("/api/public/")
-        || path == "/api/gon"
-    {
+    // Allow non-API routes and unencrypted API surfaces through.
+    if !path.starts_with("/api/") || is_vault_guard_exempt_path(path) {
         return next.run(request).await;
     }
     // Only block when Sealed (not Uninitialized).

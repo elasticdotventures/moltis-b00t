@@ -449,6 +449,25 @@ pub struct ChannelReplyTarget {
     /// Used to thread replies (e.g. Telegram `reply_to_message_id`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
+    /// Forum-topic / thread identifier (e.g. Telegram `message_thread_id`).
+    /// When present, outbound messages are routed to this topic instead of the
+    /// top-level chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+}
+
+impl ChannelReplyTarget {
+    /// Returns the address string for outbound sends.
+    ///
+    /// For Telegram forum topics this encodes both chat and thread as
+    /// `"chat_id:thread_id"` so the outbound implementation can route to the
+    /// correct topic. All other channels return the plain `chat_id`.
+    pub fn outbound_to(&self) -> std::borrow::Cow<'_, str> {
+        match &self.thread_id {
+            Some(tid) => std::borrow::Cow::Owned(format!("{}:{}", self.chat_id, tid)),
+            None => std::borrow::Cow::Borrowed(&self.chat_id),
+        }
+    }
 }
 
 // ── Interactive messages ─────────────────────────────────────────────────────
@@ -805,8 +824,56 @@ mod tests {
             account_id: "bot1".into(),
             chat_id: "42".into(),
             message_id: None,
+            thread_id: None,
         };
         assert!(!sink.update_location(&target, 48.8566, 2.3522).await);
+    }
+
+    #[test]
+    fn outbound_to_without_thread_id() {
+        let target = ChannelReplyTarget {
+            channel_type: ChannelType::Telegram,
+            account_id: "bot1".into(),
+            chat_id: "12345".into(),
+            message_id: None,
+            thread_id: None,
+        };
+        assert_eq!(target.outbound_to().as_ref(), "12345");
+    }
+
+    #[test]
+    fn outbound_to_with_thread_id() {
+        let target = ChannelReplyTarget {
+            channel_type: ChannelType::Telegram,
+            account_id: "bot1".into(),
+            chat_id: "-100999".into(),
+            message_id: None,
+            thread_id: Some("42".into()),
+        };
+        assert_eq!(target.outbound_to().as_ref(), "-100999:42");
+    }
+
+    #[test]
+    fn reply_target_thread_id_serde_roundtrip() {
+        let target = ChannelReplyTarget {
+            channel_type: ChannelType::Telegram,
+            account_id: "bot1".into(),
+            chat_id: "-100999".into(),
+            message_id: None,
+            thread_id: Some("42".into()),
+        };
+        let json = serde_json::to_string(&target).unwrap();
+        assert!(json.contains("\"thread_id\":\"42\""));
+        let restored: ChannelReplyTarget = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.thread_id.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn reply_target_without_thread_id_deserializes() {
+        // Existing JSON without thread_id should deserialize with None.
+        let json = r#"{"channel_type":"telegram","account_id":"bot1","chat_id":"123"}"#;
+        let target: ChannelReplyTarget = serde_json::from_str(json).unwrap();
+        assert!(target.thread_id.is_none());
     }
 
     #[test]

@@ -37,6 +37,7 @@
 - [GraphQL API](graphql.md)
 - [Session State](session-state.md)
 - [Session Branching](session-branching.md)
+- [Checkpoints](checkpoints.md)
 - [Scheduling (Cron Jobs)](scheduling.md)
 - [Skill Self-Extension](skill-tools.md)
 - [Mobile PWA](mobile-pwa.md)

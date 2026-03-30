@@ -11,7 +11,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{SkillMetadata, SkillRequirements, SkillSource};
+use crate::types::{SkillMetadata, SkillSource};
 
 // ── Plugin format enum ──────────────────────────────────────────────────────
 
@@ -343,13 +343,9 @@ impl ClaudeCodeAdapter {
                         description
                     },
                     homepage: author.as_ref().map(|a| format!("https://github.com/{a}")),
-                    license: None,
-                    compatibility: None,
-                    allowed_tools: Vec::new(),
-                    requires: SkillRequirements::default(),
                     path: path.parent().unwrap_or(plugin_dir).to_path_buf(),
                     source: Some(SkillSource::Plugin),
-                    dockerfile: None,
+                    ..Default::default()
                 };
 
                 results.push(PluginSkillEntry {

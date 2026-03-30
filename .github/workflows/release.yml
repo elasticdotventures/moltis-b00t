@@ -11,6 +11,11 @@ on:
         required: false
         default: false
         type: boolean
+      pre_release:
+        description: "Publish as pre-release (builds and uploads artifacts but skips Homebrew tap, deploy templates, and releases.json updates)"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -21,6 +26,7 @@ permissions: {}
 env:
   NIGHTLY_TOOLCHAIN: nightly-2025-11-30
   RELEASE_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
+  RELEASE_PRE_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.pre_release && 'true' || 'false' }}
 
 jobs:
   zizmor:
@@ -29,7 +35,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
@@ -66,7 +72,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
       - name: Dry-run short-circuit
@@ -88,7 +94,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
       - name: Dry-run short-circuit
@@ -113,7 +119,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
       - name: Dry-run short-circuit
@@ -126,7 +132,11 @@ jobs:
         if: ${{ env.RELEASE_DRY_RUN != 'true' }}
         run: |
           apt-get update
-          apt-get install -y curl git cmake build-essential clang libclang-dev pkg-config ca-certificates
+          apt-get install -y curl git cmake build-essential clang libclang-dev pkg-config ca-certificates wget gpg
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | tee /etc/apt/trusted.gpg.d/lunarg.asc >/dev/null
+          echo "deb https://packages.lunarg.com/vulkan jammy main" | tee /etc/apt/sources.list.d/lunarg-vulkan-jammy.list
+          apt-get update
+          apt-get install -y vulkan-sdk
           nvcc --version
       - uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561 # master
         if: ${{ env.RELEASE_DRY_RUN != 'true' }}
@@ -162,7 +172,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
       - name: Dry-run short-circuit
@@ -191,7 +201,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
@@ -267,7 +277,7 @@ jobs:
       id-token: write # Required for Sigstore keyless signing
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
@@ -320,7 +330,8 @@ jobs:
       - name: Build .deb package
         env:
           BUILD_TARGET: ${{ matrix.target }}
-        run: cargo deb -p moltis --no-build --target "$BUILD_TARGET"
+          MOLTIS_VERSION: ${{ steps.release_version.outputs.version }}
+        run: cargo deb -p moltis --no-build --target "$BUILD_TARGET" --deb-version "$MOLTIS_VERSION"
 
       - name: Sign with Sigstore and generate checksums
         if: ${{ env.RELEASE_DRY_RUN != 'true' }}
@@ -360,7 +371,7 @@ jobs:
       id-token: write # Required for Sigstore keyless signing
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
@@ -408,7 +419,8 @@ jobs:
       - name: Build .rpm package
         env:
           BUILD_TARGET: ${{ matrix.target }}
-        run: cargo generate-rpm -p crates/cli --target "$BUILD_TARGET"
+          MOLTIS_VERSION: ${{ steps.release_version.outputs.version }}
+        run: cargo generate-rpm -p crates/cli --target "$BUILD_TARGET" --set-metadata="version=\"$MOLTIS_VERSION\""
 
       - name: Sign with Sigstore and generate checksums
         if: ${{ env.RELEASE_DRY_RUN != 'true' }}
@@ -448,7 +460,7 @@ jobs:
       id-token: write # Required for Sigstore keyless signing
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
@@ -559,7 +571,7 @@ jobs:
       id-token: write # Required for Sigstore keyless signing
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
@@ -679,7 +691,7 @@ jobs:
       id-token: write # Required for Sigstore keyless signing
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
@@ -745,7 +757,7 @@ jobs:
       id-token: write # Required for Sigstore keyless signing
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
@@ -834,7 +846,7 @@ jobs:
       id-token: write # Required for Sigstore keyless signing
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
@@ -924,7 +936,7 @@ jobs:
       BUILD_TARGET: x86_64-pc-windows-msvc
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
@@ -1027,7 +1039,7 @@ jobs:
       image: ghcr.io/${{ github.repository }}
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
@@ -1239,6 +1251,12 @@ jobs:
       contents: write
 
     steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+
       - name: Download all build artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -1259,6 +1277,7 @@ jobs:
             -o -name '*.AppImage' -o -name '*.snap' -o -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' \
             -o -name '*.sha256' -o -name '*.sha512' -o -name '*.sig' -o -name '*.crt' \
           \) -exec cp {} release-files/ \;
+          cp CHANGELOG.md release-files/
           echo "Files to upload:"
           ls -lh release-files/
 
@@ -1266,6 +1285,7 @@ jobs:
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
         with:
           files: release-files/*
+          prerelease: ${{ env.RELEASE_PRE_RELEASE == 'true' }}
 
   # Generate SBOM for the entire release
   generate-sbom:
@@ -1280,7 +1300,7 @@ jobs:
       id-token: write # Required for Sigstore keyless signing
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
@@ -1319,7 +1339,7 @@ jobs:
     needs:
       - upload-release
       - merge-docker
-    if: startsWith(github.ref, 'refs/tags/') && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+    if: startsWith(github.ref, 'refs/tags/') && !(github.event_name == 'workflow_dispatch' && (inputs.dry_run || inputs.pre_release))
     runs-on: ubuntu-latest
     name: Update Homebrew tap
     permissions:
@@ -1361,7 +1381,7 @@ jobs:
 
       - name: Checkout homebrew-tap
         if: steps.token_check.outputs.has_token == 'true'
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: moltis-org/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -1424,13 +1444,13 @@ jobs:
 
   update-deploy-tags:
     needs: merge-docker
-    if: startsWith(github.ref, 'refs/tags/') && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+    if: startsWith(github.ref, 'refs/tags/') && !(github.event_name == 'workflow_dispatch' && (inputs.dry_run || inputs.pre_release))
     runs-on: ubuntu-latest
     name: Update deploy template tags
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
           ref: main

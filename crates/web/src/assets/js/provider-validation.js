@@ -53,6 +53,12 @@ export function isModelServiceNotConfigured(error) {
 	return error.toLowerCase().includes(MODEL_SERVICE_NOT_CONFIGURED);
 }
 
+export function isTimeoutError(error) {
+	if (!error || typeof error !== "string") return false;
+	var lower = error.toLowerCase();
+	return lower.includes("timeout") || lower.includes("timed out");
+}
+
 /**
  * Validate provider credentials without saving them.
  * Returns { valid, models?, error? }.

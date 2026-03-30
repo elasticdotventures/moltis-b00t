@@ -132,14 +132,9 @@ mod tests {
         reg.insert(SkillMetadata {
             name: "my-skill".into(),
             description: "test".into(),
-            license: None,
-            compatibility: None,
-            allowed_tools: vec![],
-            homepage: None,
-            dockerfile: None,
-            requires: Default::default(),
             path: skill_dir,
             source: Some(SkillSource::Project),
+            ..Default::default()
         });
 
         let skills = reg.list_skills().await.unwrap();
@@ -160,15 +155,9 @@ mod tests {
         let mut reg = InMemoryRegistry::new();
         reg.insert(SkillMetadata {
             name: "local".into(),
-            description: "".into(),
-            license: None,
-            compatibility: None,
-            allowed_tools: vec![],
-            homepage: None,
-            dockerfile: None,
-            requires: Default::default(),
             path: PathBuf::from("/tmp/local"),
             source: Some(SkillSource::Project),
+            ..Default::default()
         });
         assert!(reg.remove_skill("local").await.is_err());
     }

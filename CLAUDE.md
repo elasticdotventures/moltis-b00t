@@ -240,8 +240,8 @@ For incremental local edits before full validation:
 
 Exact commands (must match `local-validate.sh`):
 - Fmt: `cargo +nightly-2025-11-30 fmt --all -- --check`
-- Clippy: `cargo +nightly-2025-11-30 clippy -Z unstable-options --workspace --all-features --all-targets --timings -- -D warnings`
-- macOS without `nvcc`: clippy without `--all-features`
+- Clippy: `just lint` (OS-aware: on macOS excludes CUDA features, on Linux uses `--all-features`)
+- Tests: `just test` (OS-aware: on macOS uses nextest without CUDA features, on Linux uses `--all-features`)
 - macOS app (Darwin hosts): `./scripts/build-swift-bridge.sh && ./scripts/generate-swift-project.sh && ./scripts/lint-swift.sh && xcodebuild -project apps/macos/Moltis.xcodeproj -scheme Moltis -configuration Release -destination "platform=macOS" -derivedDataPath apps/macos/.derivedData-local-validate build`
 - iOS app (Darwin hosts): `cargo run -p moltis-schema-export -- apps/ios/GraphQL/Schema/schema.graphqls && ./scripts/generate-ios-graphql.sh && ./scripts/generate-ios-project.sh && xcodebuild -project apps/ios/Moltis.xcodeproj -scheme Moltis -configuration Debug -destination "generic/platform=iOS" CODE_SIGNING_ALLOWED=NO build`
 
@@ -257,9 +257,9 @@ with exact commands), `## Manual QA`. Include concrete test steps.
 - [ ] `taplo fmt` (TOML changes)
 - [ ] `biome check --write` (JS changes)
 - [ ] Rust fmt passes (exact command above)
-- [ ] Rust clippy passes (exact command above)
+- [ ] `just lint` passes (OS-aware clippy)
 - [ ] `just release-preflight` passes
-- [ ] `cargo test` passes
+- [ ] `just test` passes
 - [ ] Conventional commit message
 - [ ] No debug code or temp files
 
@@ -362,6 +362,20 @@ bd automatically syncs via Dolt:
 - Each write auto-commits to Dolt history
 - Use `bd dolt push`/`bd dolt pull` for remote sync
 - No manual export/import needed!
+
+### Worktrees
+
+If you create a git worktree with plain `git worktree add`, Beads will not
+automatically share the main checkout's `.beads` state. For an existing
+worktree, run:
+
+```bash
+./scripts/bd-worktree-attach.sh
+```
+
+This writes `.beads/redirect` so the worktree uses the main repository's Beads
+database. If you create worktrees through `bd worktree create`, it should set
+up the redirect for you automatically.
 
 ### Important Rules
 

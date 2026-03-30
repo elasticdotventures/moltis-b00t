@@ -27,9 +27,9 @@ pub use wasm::WasmSandbox;
 pub use {
     containers::{
         ContainerBackend, ContainerDiskUsage, ContainerRunState, RunningContainer, SandboxImage,
-        clean_all_containers, clean_sandbox_images, container_disk_usage, list_running_containers,
-        list_sandbox_images, remove_container, remove_sandbox_image, restart_container_daemon,
-        sandbox_image_tag, stop_container,
+        clean_all_containers, clean_sandbox_images, container_cli, container_disk_usage,
+        list_running_containers, list_sandbox_images, remove_container, remove_sandbox_image,
+        restart_container_daemon, sandbox_image_tag, stop_container,
     },
     docker::{DockerSandbox, NoSandbox},
     host::{HostProvisionResult, is_debian_host, provision_host_packages},

@@ -58,6 +58,44 @@ priority_models = ["gpt-5.2"]
 
 See [Providers](providers.md) for the full list of supported providers and configuration options.
 
+## Remote Execution
+
+Command execution can stay local, route to a paired node, or use SSH:
+
+```toml
+[tools.exec]
+host = "local"                 # "local", "node", or "ssh"
+# node = "mac-mini"            # default paired node when host = "node"
+# ssh_target = "deploy@box"    # default SSH target when host = "ssh"
+```
+
+When `host = "ssh"`, Moltis can work in two modes:
+
+- **System OpenSSH**: reuse your existing host aliases, agent forwarding policy,
+  and `~/.ssh/config`.
+- **Managed targets**: create or import a deploy key in **Settings → SSH**,
+  then bind that key to a named target. Moltis stores the private key in its
+  credential store and encrypts it with the vault whenever the vault is
+  unsealed. Imported keys may be passphrase-protected, Moltis strips the
+  passphrase during import so runtime execution can stay non-interactive.
+
+For stricter SSH verification, managed targets also accept a pasted
+`known_hosts` line from `ssh-keyscan -H host`. The SSH settings page can scan
+that for you, and saved targets can refresh or clear their stored pin later.
+When present, Moltis uses that pin instead of your global OpenSSH known-host
+policy for that target.
+
+Managed targets appear in the Nodes page and chat node picker, so users can see
+where `exec` will run without digging through config. If multiple managed
+targets exist, the default one is used when `tools.exec.host = "ssh"` and no
+session-specific route is selected. `moltis doctor` also reports remote-exec
+inventory, active backend mode, and obvious SSH setup problems from the CLI.
+
+`Settings -> Tools` shows the effective tool inventory for the active session
+and model, including tool-calling support, MCP server state, skills/plugins,
+and available execution routes. It is session-aware by design, switching the
+model or disabling MCP for a session changes what appears there.
+
 ## Sandbox Configuration
 
 Commands run inside isolated containers for security:
@@ -120,6 +158,24 @@ If no search API key is configured:
 
 - with `duckduckgo_fallback = false` (default), Moltis returns a clear hint to set `BRAVE_API_KEY` or `PERPLEXITY_API_KEY`
 - with `duckduckgo_fallback = true`, Moltis attempts DuckDuckGo HTML search, which may hit CAPTCHA/rate limits
+
+## Skills
+
+Configure skill discovery and agent-managed personal skills:
+
+```toml
+[skills]
+enabled = true
+auto_load = ["commit"]
+enable_agent_sidecar_files = false  # Opt-in: allow agents to write sidecar text files in personal skills
+```
+
+`enable_agent_sidecar_files` is disabled by default. When enabled, Moltis
+registers the `write_skill_files` tool so agents can write supplementary files
+such as `script.sh`, `Dockerfile`, templates, or `_meta.json` inside
+`<data_dir>/skills/<name>/`. Writes stay confined to that personal skill
+directory, reject path traversal and symlink escapes, and are recorded in
+`~/.moltis/logs/security-audit.jsonl`.
 
 ## Chat Message Queue
 
@@ -188,10 +244,13 @@ Connect to Model Context Protocol servers:
 
 ```toml
 [mcp]
+request_timeout_secs = 30
+                                    # Default timeout for MCP requests (seconds)
 
 [mcp.servers.filesystem]
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed"]
+request_timeout_secs = 90        # Optional override for this server
 
 [mcp.servers.github]
 command = "npx"

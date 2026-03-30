@@ -214,7 +214,7 @@ impl ChannelPlugin for SlackPlugin {
         let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
         accounts
             .get(account_id)
-            .and_then(|s| serde_json::to_value(&s.config).ok())
+            .and_then(|s| serde_json::to_value(crate::config::RedactedConfig(&s.config)).ok())
     }
 
     fn update_account_config(

@@ -5,7 +5,8 @@ export default {
 	title: "Skills",
 	refresh: "Refresh",
 	emergencyDisable: "Emergency Disable",
-	description: "SKILL.md-based skills discovered from project, personal, and installed paths.",
+	description:
+		"SKILL.md-based skills discovered from project, personal, and installed paths. Imported bundles stay quarantined until explicitly cleared.",
 	howToWriteSkill: "How to write a skill?",
 
 	// ── Emergency disable ───────────────────────────────────
@@ -53,7 +54,7 @@ export default {
 	deletedSkill: "Deleted {{name}}",
 	disabledSkill: "Disabled {{name}}",
 	cannotDisableUnknownSource: "Cannot disable: unknown source for skill.",
-	deleteSkillConfirm: 'Delete skill "{{name}}"? This removes the SKILL.md file.',
+	deleteSkillConfirm: 'Delete skill "{{name}}"? This removes the entire skill directory.',
 	disabling: "Disabling...",
 	deleting: "Deleting...",
 

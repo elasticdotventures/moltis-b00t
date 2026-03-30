@@ -51,14 +51,8 @@ mod tests {
         let skills = vec![SkillMetadata {
             name: "commit".into(),
             description: "Create git commits".into(),
-            license: None,
-            compatibility: None,
-            allowed_tools: vec![],
-            homepage: None,
-            dockerfile: None,
-            requires: Default::default(),
             path: PathBuf::from("/home/user/.moltis/skills/commit"),
-            source: None,
+            ..Default::default()
         }];
         let prompt = generate_skills_prompt(&skills);
         assert!(prompt.contains("<available_skills>"));
@@ -74,26 +68,14 @@ mod tests {
             SkillMetadata {
                 name: "commit".into(),
                 description: "Commits".into(),
-                license: None,
-                compatibility: None,
-                allowed_tools: vec![],
-                homepage: None,
-                dockerfile: None,
-                requires: Default::default(),
                 path: PathBuf::from("/a"),
-                source: None,
+                ..Default::default()
             },
             SkillMetadata {
                 name: "review".into(),
                 description: "Reviews".into(),
-                license: None,
-                compatibility: None,
-                allowed_tools: vec![],
-                homepage: None,
-                dockerfile: None,
-                requires: Default::default(),
                 path: PathBuf::from("/b"),
-                source: None,
+                ..Default::default()
             },
         ];
         let prompt = generate_skills_prompt(&skills);

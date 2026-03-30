@@ -493,12 +493,12 @@ fn load_or_default_config(path: &Path) -> moltis_config::MoltisConfig {
 }
 
 /// Serialize a `MoltisConfig` to TOML and write it to the given path.
+///
+/// Delegates to [`moltis_config::loader::save_config_to_path`] so that
+/// existing comments in the TOML file are preserved during import.
 fn save_config_to_path(path: &Path, config: &moltis_config::MoltisConfig) -> error::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let toml_str = toml::to_string_pretty(config)?;
-    std::fs::write(path, toml_str)?;
+    moltis_config::loader::save_config_to_path(path, config)
+        .map_err(|e| error::Error::message(e.to_string()))?;
     Ok(())
 }
 
@@ -1089,5 +1089,61 @@ mod tests {
         // Report should have both
         assert!(report.imported_identity.is_some());
         assert!(report.imported_channels.is_some());
+    }
+
+    #[test]
+    fn import_preserves_toml_comments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".openclaw");
+        setup_full_openclaw(&home);
+
+        let config_dir = tmp.path().join("config");
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        // Write a config file with comments (simulating the template)
+        let template = r#"# Moltis configuration
+# See docs for all options
+
+[identity]
+# name = "My Assistant"
+# theme = "helpful and concise"
+
+[user]
+# name = "Your Name"
+# timezone = "UTC"
+
+[channels]
+# Configure messaging channels below
+"#;
+        std::fs::write(config_dir.join("moltis.toml"), template).unwrap();
+
+        let detection = detect::detect_at(home).unwrap();
+        let selection = ImportSelection {
+            identity: true,
+            ..Default::default()
+        };
+        let report = import(&detection, &selection, &config_dir, &data_dir);
+        assert!(
+            report.imported_identity.is_some(),
+            "identity should have been imported, report: {report:?}"
+        );
+
+        let content = std::fs::read_to_string(config_dir.join("moltis.toml")).unwrap();
+
+        // Imported values should be present
+        let config: moltis_config::MoltisConfig = toml::from_str(&content).unwrap();
+        assert_eq!(config.identity.name.as_deref(), Some("Claude"));
+
+        // Comments from the original template should be preserved
+        assert!(
+            content.contains("# Moltis configuration"),
+            "top-level comment should be preserved, got:\n{content}"
+        );
+        assert!(
+            content.contains("# See docs for all options"),
+            "documentation comment should be preserved, got:\n{content}"
+        );
     }
 }

@@ -465,6 +465,13 @@ else
   fi
 fi
 
+# Skip validation if this exact commit already passed.
+VALIDATE_MARKER=".local-validate-ok"
+if [[ -f "$VALIDATE_MARKER" ]] && [[ "$(cat "$VALIDATE_MARKER" 2>/dev/null)" == "$SHA" ]]; then
+  echo "Commit ${SHA:0:7} already validated — skipping."
+  exit 0
+fi
+
 # macOS local builds can leave stale cmake output dirs where configure was skipped
 # but no generator files remain. Clean those up before lint/test.
 repair_stale_llama_build_dirs
@@ -478,6 +485,8 @@ run_check_async "local/i18n" "$i18n_cmd"
 i18n_pid="$RUN_CHECK_ASYNC_PID"
 run_check_async "local/zizmor" "$zizmor_cmd"
 zizmor_pid="$RUN_CHECK_ASYNC_PID"
+run_check_async "local/install-names" "./scripts/check-install-package-names.sh"
+install_names_pid="$RUN_CHECK_ASYNC_PID"
 
 parallel_failed=0
 if ! wait "$fmt_pid"; then parallel_failed=1; fi
@@ -486,6 +495,8 @@ if ! wait "$biome_pid"; then parallel_failed=1; fi
 if ! report_async_result "local/biome" "$biome_pid"; then parallel_failed=1; fi
 if ! wait "$i18n_pid"; then parallel_failed=1; fi
 if ! report_async_result "local/i18n" "$i18n_pid"; then parallel_failed=1; fi
+if ! wait "$install_names_pid"; then parallel_failed=1; fi
+if ! report_async_result "local/install-names" "$install_names_pid"; then parallel_failed=1; fi
 
 if [[ "$parallel_failed" -ne 0 ]]; then
   echo "One or more parallel local checks failed." >&2
@@ -577,6 +588,9 @@ if [[ "$zizmor_failed" -ne 0 ]]; then
   echo "local/zizmor failed." >&2
   exit 1
 fi
+
+# Record successful validation for this commit.
+printf '%s' "$SHA" > "$VALIDATE_MARKER"
 
 if [[ "$LOCAL_ONLY" -eq 1 ]]; then
   echo "All local checks passed."

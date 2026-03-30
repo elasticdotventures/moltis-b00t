@@ -17,12 +17,14 @@ use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
 
 use async_trait::async_trait;
 
-use moltis_gateway::{
-    auth::{self, CredentialStore},
-    methods::MethodRegistry,
-    server::{build_gateway_base, finalize_gateway_app},
-    services::{GatewayServices, OnboardingService, ServiceResult},
-    state::GatewayState,
+use {
+    moltis_gateway::{
+        auth::{self, CredentialStore},
+        methods::MethodRegistry,
+        services::{GatewayServices, OnboardingService, ServiceResult},
+        state::GatewayState,
+    },
+    moltis_httpd::server::{build_gateway_base, finalize_gateway_app},
 };
 
 /// Start a test server with a credential store (auth enabled).
@@ -182,6 +184,79 @@ async fn start_localhost_server_with_vault() -> (
         .unwrap();
     });
     (addr, cred_store, state_clone, vault)
+}
+
+/// Start a localhost test server with a vault and session store attached.
+#[cfg(feature = "vault")]
+async fn start_localhost_server_with_vault_and_session_store() -> (
+    SocketAddr,
+    Arc<CredentialStore>,
+    Arc<GatewayState>,
+    Arc<moltis_vault::Vault>,
+    Arc<moltis_sessions::store::SessionStore>,
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    moltis_config::set_config_dir(tmp.path().to_path_buf());
+    moltis_config::set_data_dir(tmp.path().to_path_buf());
+    let sessions_dir = tmp.path().join("sessions");
+    std::mem::forget(tmp);
+
+    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    moltis_vault::run_migrations(&pool).await.unwrap();
+    let auth_config = moltis_config::AuthConfig::default();
+    let vault = Arc::new(moltis_vault::Vault::new(pool.clone()).await.unwrap());
+    let cred_store = Arc::new(
+        CredentialStore::with_vault(pool, &auth_config, Some(Arc::clone(&vault)))
+            .await
+            .unwrap(),
+    );
+    let session_store = Arc::new(moltis_sessions::store::SessionStore::new(sessions_dir));
+
+    let resolved_auth = auth::resolve_auth(None, None);
+    let services = GatewayServices::noop().with_session_store(Arc::clone(&session_store));
+    let state = GatewayState::with_options(
+        resolved_auth,
+        services,
+        None,
+        Some(Arc::clone(&cred_store)),
+        None, // pairing_store
+        true,
+        false,
+        false,
+        None,
+        None,
+        18789,
+        false,
+        None,
+        None, // session_event_bus
+        #[cfg(feature = "metrics")]
+        None,
+        #[cfg(feature = "metrics")]
+        None,
+        #[cfg(feature = "vault")]
+        Some(Arc::clone(&vault)),
+    );
+    let state_clone = Arc::clone(&state);
+    let methods = Arc::new(MethodRegistry::new());
+    #[cfg(feature = "push-notifications")]
+    let (router, app_state) = build_gateway_base(state, methods, None, None);
+    #[cfg(not(feature = "push-notifications"))]
+    let (router, app_state) = build_gateway_base(state, methods, None);
+
+    let router = router.merge(moltis_web::web_routes());
+    let app = finalize_gateway_app(router, app_state, false);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    (addr, cred_store, state_clone, vault, session_store)
 }
 
 /// Start a test server without a credential store (no auth).
@@ -1612,6 +1687,58 @@ async fn password_change_on_initialized_vault_no_recovery_key() {
     );
 
     assert!(store.has_password().await.unwrap());
+}
+
+/// Bootstrap remains available when the vault is sealed because it does not
+/// serve vault-encrypted session history.
+#[cfg(all(feature = "web-ui", feature = "vault"))]
+#[tokio::test]
+async fn sealed_vault_allows_bootstrap() {
+    let (addr, _store, _state, vault) = start_localhost_server_with_vault().await;
+    let _rk = vault.initialize("testpass123").await.unwrap();
+    vault.seal().await;
+
+    let blocked_resp = reqwest::get(format!("http://{addr}/api/skills"))
+        .await
+        .unwrap();
+    assert_eq!(blocked_resp.status(), 423);
+
+    let resp = reqwest::get(format!(
+        "http://{addr}/api/bootstrap?include_sessions=false"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+/// Session history remains available when the vault is sealed because session
+/// JSONL files are not yet encrypted by the vault.
+#[cfg(all(feature = "web-ui", feature = "vault"))]
+#[tokio::test]
+async fn sealed_vault_allows_session_history() {
+    let (addr, _store, _state, vault, session_store) =
+        start_localhost_server_with_vault_and_session_store().await;
+    session_store
+        .append(
+            "main",
+            &serde_json::json!({"role": "user", "content": "hello"}),
+        )
+        .await
+        .unwrap();
+    let _rk = vault.initialize("testpass123").await.unwrap();
+    vault.seal().await;
+
+    let blocked_resp = reqwest::get(format!("http://{addr}/api/skills"))
+        .await
+        .unwrap();
+    assert_eq!(blocked_resp.status(), 423);
+
+    let resp = reqwest::get(format!("http://{addr}/api/sessions/main/history"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["history"][0]["content"], "hello");
 }
 
 // ── Onboarding auth bypass tests ────────────────────────────────────────────

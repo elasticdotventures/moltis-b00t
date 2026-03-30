@@ -95,8 +95,8 @@ auto_generate = true              # Auto-generate local CA and server certificat
 offered = ["local-llm", "github-copilot", "openai-codex", "openai", "anthropic", "openrouter", "ollama", "moonshot", "minimax", "zai"] # Enabled providers and those shown in onboarding/picker UI ([] = enable/show all)
 # All available providers:
 #   "anthropic", "openai", "gemini", "groq", "xai", "deepseek",
-#   "mistral", "openrouter", "cerebras", "minimax", "moonshot",
-#   "zai", "venice", "ollama", "local-llm", "openai-codex",
+#   "fireworks", "mistral", "openrouter", "cerebras", "minimax",
+#   "moonshot", "zai", "zai-code", "venice", "ollama", "local-llm", "openai-codex",
 #   "github-copilot", "kimi-code"
 
 # ── Anthropic (Claude) ────────────────────────────────────────
@@ -107,6 +107,7 @@ offered = ["local-llm", "github-copilot", "openai-codex", "openai", "anthropic",
 # fetch_models = true                          # Set false to skip remote discovery
 # base_url = "https://api.anthropic.com"     # API endpoint
 # alias = "anthropic"                         # Custom name for metrics
+# cache_retention = "short"                    # Prompt caching: "none" | "short" | "long"
 
 # ── OpenAI ────────────────────────────────────────────────────
 [providers.openai]
@@ -141,6 +142,15 @@ models = ["gpt-5.3", "gpt-5.2"]              # Preferred models shown first
 # models = ["deepseek-chat"]
 # base_url = "https://api.deepseek.com"
 # alias = "deepseek"
+
+# ── Fireworks ────────────────────────────────────────────────
+# [providers.fireworks]
+# enabled = true
+# api_key = "..."                             # Or set FIREWORKS_API_KEY env var
+# models = ["accounts/fireworks/routers/kimi-k2p5-turbo"]
+# fetch_models = true                          # Set false to skip remote discovery
+# base_url = "https://api.fireworks.ai/inference/v1"
+# alias = "fireworks"
 
 # ── xAI (Grok) ────────────────────────────────────────────────
 # [providers.xai]
@@ -206,6 +216,7 @@ message_queue_mode = "followup"   # Default: process queued messages one-by-one 
 agent_timeout_secs = 600          # Max seconds for an agent run (0 = no timeout)
 agent_max_iterations = 25         # Max LLM/tool loop iterations before stopping
 max_tool_result_bytes = 50000     # Max bytes per tool result before truncation (50KB)
+# registry_mode = "full"          # "full" = all schemas every turn, "lazy" = tool_search discovery
 
 # ── Maps ─────────────────────────────────────────────────────────────────────
 
@@ -230,6 +241,12 @@ security_level = "allowlist"      # Security mode:
                                   #   "strict"     - Very restrictive
 allowlist = []                    # Command patterns to allow (when security_level = "allowlist")
                                   # Example: ["git *", "npm *", "cargo *"]
+host = "local"                    # Where to run commands:
+                                  #   "local" - Run on this machine (default)
+                                  #   "node"  - Run on a connected Moltis node
+                                  #   "ssh"   - Run through the system ssh client
+# node = "mac-mini"               # Default node id/display name when host = "node"
+# ssh_target = "deploy@box"       # SSH host alias or user@host when host = "ssh"
 
 # ── Sandbox Configuration ─────────────────────────────────────────────────────
 # Commands run inside isolated containers for security.
@@ -429,9 +446,10 @@ allowed_domains = []              # Empty = all domains allowed
 [skills]
 enabled = true                    # Enable skills system
 search_paths = []                 # Additional directories to search for skills
-                                  # Default locations: ~/.config/moltis/skills/, ./skills/
+                                  # Default locations include ~/.moltis/skills/
 auto_load = []                    # Skills to always load without explicit activation
                                   # Example: ["code-review", "commit"]
+enable_agent_sidecar_files = false # Allow agents to write supplementary text files inside personal skill dirs
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MCP SERVERS
@@ -440,6 +458,7 @@ auto_load = []                    # Skills to always load without explicit activ
 # See https://modelcontextprotocol.io for available servers.
 
 [mcp]
+request_timeout_secs = 30        # Default timeout for MCP requests
 # Each server has a name and configuration:
 #
 # [mcp.servers.server-name]
@@ -447,6 +466,7 @@ auto_load = []                    # Skills to always load without explicit activ
 # args = ["-y", "@package/name"]  # Command arguments
 # env = {{ KEY = "value" }}         # Environment variables for the process
 # enabled = true                  # Whether this server is enabled
+# request_timeout_secs = 90       # Optional timeout override for this server
 # transport = "stdio"             # Transport: "stdio" (default) or "sse"
 # url = "http://..."              # URL for SSE transport
 # headers = {{ Authorization = "Bearer ${{TOKEN}}" }}  # Optional HTTP headers for SSE transport
@@ -577,6 +597,20 @@ reset_on_exit = true              # Reset serve/funnel when gateway shuts down
 # External messaging integrations.
 
 [channels]
+# Which channel types appear in the web UI's "+ Add Channel" menu.
+# Default: ["telegram", "discord", "slack"]
+# Add "whatsapp" or "msteams" to enable them in the UI.
+# offered = ["telegram", "discord", "slack", "whatsapp"]
+
+# WhatsApp linked-device accounts
+# [channels.whatsapp.my-bot]
+# dm_policy = "open"              # "open", "allowlist", or "disabled"
+# group_policy = "disabled"       # "open", "allowlist", or "disabled"
+# model = "anthropic/claude-sonnet-4-20250514"
+# model_provider = "anthropic"
+# otp_self_approval = true        # OTP self-approval for non-allowlisted DM users
+# otp_cooldown_secs = 300         # Cooldown after 3 failed OTP attempts
+
 # Telegram bots
 # [channels.telegram.my-bot]
 # token = "..."                   # Bot token from @BotFather
