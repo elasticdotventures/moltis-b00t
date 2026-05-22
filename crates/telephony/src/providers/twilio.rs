@@ -268,6 +268,21 @@ impl TelephonyProvider for TwilioProvider {
 
         let call_sid = params.get("CallSid").cloned().unwrap_or_default();
 
+        if let Some(speech) = params.get("SpeechResult") {
+            let confidence = params.get("Confidence").and_then(|c| c.parse::<f32>().ok());
+            return Ok(CallEvent::Speech {
+                provider_call_id: call_sid,
+                text: speech.clone(),
+                confidence,
+            });
+        }
+        if let Some(digits) = params.get("Digits") {
+            return Ok(CallEvent::Dtmf {
+                provider_call_id: call_sid,
+                digits: digits.clone(),
+            });
+        }
+
         let status = params.get("CallStatus").map(String::as_str).unwrap_or("");
 
         match status {
@@ -297,21 +312,6 @@ impl TelephonyProvider for TwilioProvider {
                 reason: CallEndReason::Error,
             }),
             other => {
-                // Check for speech result from <Gather>.
-                if let Some(speech) = params.get("SpeechResult") {
-                    let confidence = params.get("Confidence").and_then(|c| c.parse::<f32>().ok());
-                    return Ok(CallEvent::Speech {
-                        provider_call_id: call_sid,
-                        text: speech.clone(),
-                        confidence,
-                    });
-                }
-                if let Some(digits) = params.get("Digits") {
-                    return Ok(CallEvent::Dtmf {
-                        provider_call_id: call_sid,
-                        digits: digits.clone(),
-                    });
-                }
                 debug!(status = %other, "unrecognized Twilio status, treating as error");
                 Ok(CallEvent::Error {
                     provider_call_id: call_sid,
@@ -327,7 +327,7 @@ impl TelephonyProvider for TwilioProvider {
         if let Some(url) = gather_url {
             let url = xml_escape(url);
             twiml.push_str(&format!(
-                r#"<Gather input="speech" action="{url}" speechTimeout="auto">"#
+                r#"<Gather input="speech dtmf" action="{url}" speechTimeout="auto">"#
             ));
             if let Some(msg) = message {
                 twiml.push_str(&format!(
@@ -352,7 +352,7 @@ impl TelephonyProvider for TwilioProvider {
         let mut twiml = String::from(r#"<?xml version="1.0" encoding="UTF-8"?><Response>"#);
         let action_url = xml_escape(action_url);
         twiml.push_str(&format!(
-            r#"<Gather input="speech" action="{action_url}" speechTimeout="auto">"#
+            r#"<Gather input="speech dtmf" action="{action_url}" speechTimeout="auto">"#
         ));
         if let Some(p) = prompt {
             twiml.push_str(&format!(
@@ -384,7 +384,7 @@ fn build_say_gather_twiml(text: &str, voice: Option<&str>, gather_url: Option<&s
         .unwrap_or_default();
 
     format!(
-        r#"<Response><Say voice="{voice_attr}">{text}</Say><Gather input="speech"{gather_action} speechTimeout="auto" timeout="30"/><Pause length="120"/></Response>"#
+        r#"<Response><Say voice="{voice_attr}">{text}</Say><Gather input="speech dtmf"{gather_action} speechTimeout="auto" timeout="30"/><Pause length="120"/></Response>"#
     )
 }
 
@@ -448,6 +448,7 @@ mod tests {
             .build_answer_response(Some("Hello caller"), Some("https://example.com/gather"));
         let twiml = std::str::from_utf8(&resp).unwrap_or("");
         assert!(twiml.contains("<Gather"));
+        assert!(twiml.contains(r#"input="speech dtmf""#));
         assert!(twiml.contains("Hello caller"));
         assert!(twiml.contains("https://example.com/gather"));
     }
@@ -464,6 +465,7 @@ mod tests {
 
         let gather = provider.build_gather_response(None, url);
         let gather_twiml = std::str::from_utf8(&gather).unwrap_or("");
+        assert!(gather_twiml.contains(r#"input="speech dtmf""#));
         assert!(gather_twiml.contains("foo=1&amp;bar=&quot;two&quot;"));
         assert!(!gather_twiml.contains("foo=1&bar=\"two\""));
     }
@@ -477,6 +479,7 @@ mod tests {
         );
 
         assert!(twiml.contains(r#"voice="voice&quot;attr""#));
+        assert!(twiml.contains(r#"input="speech dtmf""#));
         assert!(twiml.contains("hello &amp; goodbye"));
         assert!(
             twiml.contains(r#"action="https://example.com/gather?foo=1&amp;bar=&quot;two&quot;""#)
@@ -543,6 +546,29 @@ mod tests {
     }
 
     #[test]
+    fn parse_webhook_speech_result_with_in_progress_status() {
+        let provider = TwilioProvider::new("AC_TEST".into(), Secret::new("TOKEN".into()));
+        let body =
+            b"CallSid=CA456&CallStatus=in-progress&SpeechResult=hello%20world&Confidence=0.92";
+        let headers = HeaderMap::new();
+        let event = provider
+            .parse_webhook_event(&headers, body)
+            .unwrap_or_else(|e| panic!("{e}"));
+        match event {
+            CallEvent::Speech {
+                provider_call_id,
+                text,
+                confidence,
+            } => {
+                assert_eq!(provider_call_id, "CA456");
+                assert_eq!(text, "hello world");
+                assert!((confidence.unwrap_or(0.0) - 0.92).abs() < 0.01);
+            },
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_webhook_dtmf_digits() {
         let provider = TwilioProvider::new("AC_TEST".into(), Secret::new("TOKEN".into()));
         let body = b"CallSid=CA789&Digits=123";
@@ -552,6 +578,26 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         match event {
             CallEvent::Dtmf { digits, .. } => assert_eq!(digits, "123"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_webhook_dtmf_digits_with_in_progress_status() {
+        let provider = TwilioProvider::new("AC_TEST".into(), Secret::new("TOKEN".into()));
+        let body = b"CallSid=CA789&CallStatus=in-progress&Digits=123";
+        let headers = HeaderMap::new();
+        let event = provider
+            .parse_webhook_event(&headers, body)
+            .unwrap_or_else(|e| panic!("{e}"));
+        match event {
+            CallEvent::Dtmf {
+                provider_call_id,
+                digits,
+            } => {
+                assert_eq!(provider_call_id, "CA789");
+                assert_eq!(digits, "123");
+            },
             other => panic!("unexpected event: {other:?}"),
         }
     }
