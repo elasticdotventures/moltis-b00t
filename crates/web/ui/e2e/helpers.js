@@ -310,6 +310,49 @@ async function expectRpcOk(page, method, params) {
 	return response;
 }
 
+async function expectNoPageHorizontalOverflow(page, label = "page", testInfo = null) {
+	const overflow = await page.evaluate(() => {
+		const doc = document.documentElement;
+		const viewportWidth = window.innerWidth;
+		const tolerance = 1;
+		const overflowingElements = Array.from(document.body.querySelectorAll("*"))
+			.map((el) => {
+				const rect = el.getBoundingClientRect();
+				return {
+					tag: el.tagName.toLowerCase(),
+					id: el.id || "",
+					className: typeof el.className === "string" ? el.className : "",
+					scrollWidth: Math.round(el.scrollWidth * 100) / 100,
+					clientWidth: Math.round(el.clientWidth * 100) / 100,
+					left: Math.round(rect.left * 100) / 100,
+					right: Math.round(rect.right * 100) / 100,
+				};
+			})
+			.filter((item) => item.scrollWidth > item.clientWidth + tolerance || item.right > viewportWidth + tolerance)
+			.slice(0, 20);
+
+		return {
+			documentScrollWidth: doc.scrollWidth,
+			documentClientWidth: doc.clientWidth,
+			viewportWidth,
+			overflowingElements,
+		};
+	});
+
+	if (overflow.documentScrollWidth > overflow.documentClientWidth + 1 && testInfo) {
+		await testInfo.attach(`horizontal-overflow-${label}`, {
+			body: Buffer.from(JSON.stringify(overflow, null, 2), "utf-8"),
+			contentType: "application/json",
+		});
+	}
+
+	expect(
+		overflow.documentScrollWidth,
+		`${label} has horizontal overflow: ${JSON.stringify(overflow.overflowingElements)}`,
+	).toBeLessThanOrEqual(overflow.documentClientWidth + 1);
+	return overflow;
+}
+
 module.exports = {
 	expectPageContentMounted,
 	watchPageErrors,
@@ -319,4 +362,5 @@ module.exports = {
 	createSession,
 	sendRpcFromPage,
 	expectRpcOk,
+	expectNoPageHorizontalOverflow,
 };
