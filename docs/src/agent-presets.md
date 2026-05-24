@@ -66,6 +66,9 @@ Per preset (`[agents.presets.<name>]`):
 - `identity.name`, `identity.emoji`, `identity.theme`
 - `model`
 - `tools.allow`, `tools.deny`
+- `mcp` — MCP server access: `allow_servers` or `deny_servers`
+- `sandbox.*` — per-agent sandbox overrides
+- `skills.allow`, `skills.deny`
 - `system_prompt_suffix`
 - `max_iterations`, `timeout_secs` (override `[tools]` runtime limits for matching direct sessions and spawned sub-agents)
 - `sessions.*` access policy
@@ -111,6 +114,54 @@ The directory is created automatically so agents can write to it.
 scope = "project"
 max_lines = 100
 ```
+
+## MCP Server Access Control
+
+Each preset can restrict which MCP servers are visible. Use `allow_servers` for
+a positive allow-list, or `deny_servers` for a deny-list. The two are mutually
+exclusive — set one or the other, not both.
+
+```toml
+# Only allow specific MCP servers:
+[agents.presets.restricted.mcp]
+allow_servers = ["github", "memory"]
+
+# Block specific MCP servers:
+[agents.presets.open.mcp]
+deny_servers = ["home-assistant"]
+```
+
+When `allow_servers` is set, every configured MCP server not in the list is
+denied. An empty `allow_servers = []` blocks all MCP tools.
+
+## Per-Agent Sandbox Mode
+
+Override the global sandbox mode per agent.
+
+```toml
+[agents.presets.kids.sandbox]
+mode = "all"                 # Always sandbox this agent
+```
+
+Available values: `"off"`, `"all"`, `"non-main"`. The override is applied
+as a per-session setting on the sandbox router.
+
+## Per-Agent Skill Policy
+
+Filter which skills are visible to an agent by name or category.
+
+```toml
+# Only allow specific skills:
+[agents.presets.focused.skills]
+allow = ["web_search", "research"]
+
+# Block specific categories:
+[agents.presets.safe.skills]
+deny = ["gaming", "social-media"]
+```
+
+When `allow` is non-empty, only matching skills (by name or category) are
+visible. `deny` is then applied on top.
 
 ## Model Selection Order
 

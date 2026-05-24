@@ -121,12 +121,109 @@ export function teardownAgents(): void {
 // ── Create / Edit form ──────────────────────────────────────
 
 const PRESET_TOML_PLACEHOLDER = `model = "haiku"
-delegate_only = false
 timeout_secs = 30
 
 [tools]
 allow = ["read_file", "grep", "glob"]
-deny = ["exec"]`;
+deny = ["exec"]
+
+# MCP server access: allow_servers OR deny_servers (not both)
+# [mcp]
+# allow_servers = ["github", "memory"]
+# deny_servers = ["home-assistant"]
+
+# Sandbox mode override
+# [sandbox]
+# mode = "all"        # "off" | "all" | "non-main"
+
+# Skill access control
+# [skills]
+# deny = ["gaming", "social-media"]`;
+
+// ── Capability controls types ────────────────────────────────
+
+interface McpServer {
+	name: string;
+	enabled?: boolean;
+	display_name?: string;
+}
+
+interface PresetFields {
+	model?: string | null;
+	mcp?: { mode: string; servers?: string[] };
+	sandbox?: { mode?: string | null };
+	skills?: { allow?: string[] | null; deny?: string[] | null };
+}
+
+/** Parse a comma-separated string into a trimmed, non-empty array. */
+function parseCsvList(value: string): string[] {
+	return value
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean);
+}
+
+/**
+ * Remove named TOML sections (e.g. [mcp], [sandbox], [skills]) and their
+ * key-value lines from a TOML string.  A section runs from its `[name]`
+ * header to the next `[…]` header or end-of-string.
+ */
+function stripTomlSections(toml: string, sectionNames: string[]): string {
+	const lines = toml.split("\n");
+	const result: string[] = [];
+	let skipping = false;
+	const headers = new Set(sectionNames.map((n) => `[${n}]`));
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+			skipping = headers.has(trimmed);
+		}
+		if (!skipping) {
+			result.push(line);
+		}
+	}
+	return result.join("\n");
+}
+
+/** Escape a string for TOML double-quoted values. */
+function tomlEscape(s: string): string {
+	return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+/** Build a TOML array literal from strings. */
+function tomlArray(values: string[]): string {
+	return `[${values.map((v) => `"${tomlEscape(v)}"`).join(", ")}]`;
+}
+
+/** Build TOML from structured capability fields. */
+function buildCapabilitiesToml(fields: PresetFields): string {
+	const lines: string[] = [];
+	if (fields.model) lines.push(`model = "${tomlEscape(fields.model)}"`);
+	// MCP — always emit allow_servers when mode is "allow" (even if empty,
+	// since allow_servers = [] means "deny all MCP tools").
+	if (fields.mcp && fields.mcp.mode !== "all") {
+		lines.push("");
+		lines.push("[mcp]");
+		const key = fields.mcp.mode === "allow" ? "allow_servers" : "deny_servers";
+		lines.push(`${key} = ${tomlArray(fields.mcp.servers || [])}`);
+	}
+	// Sandbox — only mode is enforced at runtime via SandboxRouter override.
+	if (fields.sandbox?.mode) {
+		lines.push("");
+		lines.push("[sandbox]");
+		lines.push(`mode = "${tomlEscape(fields.sandbox.mode)}"`);
+	}
+	// Skills — emit allow/deny when present (including empty allow = [] which
+	// means "deny all skills", matching the MCP allow_servers = [] semantics).
+	const sk = fields.skills;
+	if (sk && (sk.allow != null || (sk.deny && sk.deny.length > 0))) {
+		lines.push("");
+		lines.push("[skills]");
+		if (sk.allow != null) lines.push(`allow = ${tomlArray(sk.allow)}`);
+		if (sk.deny && sk.deny.length > 0) lines.push(`deny = ${tomlArray(sk.deny)}`);
+	}
+	return lines.join("\n");
+}
 
 function AgentForm({ agent, onSave, onCancel }: AgentFormProps): VNode {
 	const isEdit = !!agent;
@@ -136,9 +233,19 @@ function AgentForm({ agent, onSave, onCancel }: AgentFormProps): VNode {
 	const [theme, setTheme] = useState(agent?.theme || "");
 	const [soul, setSoul] = useState("");
 	const [presetToml, setPresetToml] = useState("");
-	const [presetOpen, setPresetOpen] = useState(false);
 	const [saving, setSaving] = useState(false);
 	const [error, setError] = useState<string | null>(null);
+
+	// Structured capability fields
+	const [mcpMode, setMcpMode] = useState<"all" | "allow" | "deny">("all");
+	const [mcpServers, setMcpServers] = useState<string[]>([]);
+	const [availableMcpServers, setAvailableMcpServers] = useState<McpServer[]>([]);
+	const [sandboxMode, setSandboxMode] = useState("");
+	const [skillsAllow, setSkillsAllow] = useState("");
+	const [skillsAllowSet, setSkillsAllowSet] = useState(false);
+	const [skillsDeny, setSkillsDeny] = useState("");
+	const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
+	const [advancedTomlOpen, setAdvancedTomlOpen] = useState(false);
 
 	// Load soul: for edits fetch the agent's soul, for new agents fetch main's soul as default
 	useEffect(() => {
@@ -162,14 +269,51 @@ function AgentForm({ agent, onSave, onCancel }: AgentFormProps): VNode {
 		load();
 	}, [isEdit, agent?.id]);
 
-	// Load preset TOML for edits
+	// Fetch available MCP servers
+	useEffect(() => {
+		sendRpc("mcp.list", {}).then((res) => {
+			if (res?.ok && Array.isArray(res.payload)) {
+				setAvailableMcpServers(
+					(res.payload as McpServer[]).map((s) => ({
+						name: typeof s.name === "string" ? s.name : "",
+						enabled: s.enabled !== false,
+						display_name: typeof s.display_name === "string" ? s.display_name : undefined,
+					})),
+				);
+			}
+		});
+	}, []);
+
+	// Load preset: structured fields + TOML for edits
 	useEffect(() => {
 		if (!isEdit) return;
 		sendRpc("agents.preset.get", { id: agent?.id }).then((res) => {
-			if (res?.ok && (res.payload as { toml?: string })?.toml) {
-				const toml = (res.payload as { toml: string }).toml;
-				setPresetToml(toml);
-				if (toml.trim()) setPresetOpen(true);
+			if (!res?.ok) return;
+			const payload = res.payload as { toml?: string; fields?: PresetFields };
+			if (payload?.toml?.trim()) {
+				setPresetToml(payload.toml);
+			}
+			const f = payload?.fields;
+			if (f) {
+				if (f.mcp) {
+					setMcpMode(f.mcp.mode as "all" | "allow" | "deny");
+					setMcpServers(f.mcp.servers || []);
+					if (f.mcp.mode !== "all") setCapabilitiesOpen(true);
+				}
+				if (f.sandbox) {
+					setSandboxMode(f.sandbox.mode || "");
+					if (f.sandbox.mode) setCapabilitiesOpen(true);
+				}
+				if (f.skills) {
+					if (Array.isArray(f.skills.allow)) {
+						setSkillsAllow(f.skills.allow.join(", "));
+						setSkillsAllowSet(true);
+					}
+					setSkillsDeny((f.skills.deny || []).join(", "));
+					if (Array.isArray(f.skills.allow) || (f.skills.deny && f.skills.deny.length > 0)) {
+						setCapabilitiesOpen(true);
+					}
+				}
 			}
 		});
 	}, [isEdit, agent?.id]);
@@ -197,13 +341,42 @@ function AgentForm({ agent, onSave, onCancel }: AgentFormProps): VNode {
 		if (trimmedSoul) {
 			pending.push(sendRpc("agents.identity.update_soul", { agent_id: agentId, soul: trimmedSoul }));
 		}
-		// Save preset TOML if the section was opened or has content
-		if (presetToml.trim()) {
-			pending.push(sendRpc("agents.preset.save", { id: agentId, toml: presetToml.trim() }));
+		// Build TOML: merge structured capability fields with any raw TOML.
+		// The raw TOML textarea always preserves user content (tools, model,
+		// timeouts, etc.). Structured fields generate [mcp], [sandbox], [skills]
+		// sections that are prepended. Apply structured fields whenever they
+		// contain non-default values, even if the user collapsed the panel before
+		// saving.
+		const capabilitiesConfigured =
+			mcpMode !== "all" || mcpServers.length > 0 || sandboxMode !== "" || skillsAllowSet || skillsDeny.trim() !== "";
+		let tomlToSave = presetToml.trim();
+		if (capabilitiesOpen || capabilitiesConfigured) {
+			const generated = buildCapabilitiesToml({
+				mcp: { mode: mcpMode, servers: mcpServers },
+				sandbox: { mode: sandboxMode || null },
+				skills: {
+					allow: skillsAllowSet ? parseCsvList(skillsAllow) : null,
+					deny: parseCsvList(skillsDeny),
+				},
+			});
+			// Merge: strip [mcp], [sandbox], [skills] sections from the raw TOML
+			// to avoid duplicates. Put raw top-level keys FIRST so they stay at
+			// the TOML document root, then APPEND generated sections — this
+			// prevents model/timeout_secs/etc. from being misassigned to the
+			// last generated section header.
+			const rawWithoutStructured = stripTomlSections(tomlToSave, ["mcp", "sandbox", "skills"]).trim();
+			tomlToSave = rawWithoutStructured ? `${rawWithoutStructured}\n\n${generated}` : generated;
+		}
+		// Always save when capabilities are active — an empty TOML string
+		// clears the preset, which is correct when the user has removed all
+		// restrictions. Without this, old restrictions survive silently.
+		const savingToml = capabilitiesOpen || capabilitiesConfigured || !!tomlToSave;
+		if (savingToml) {
+			pending.push(sendRpc("agents.preset.save", { id: agentId, toml: tomlToSave }));
 		}
 		if (pending.length > 0) {
 			Promise.all(pending).then((results) => {
-				const tomlResult = presetToml.trim()
+				const tomlResult = savingToml
 					? (results[results.length - 1] as { ok?: boolean; error?: { message?: string } })
 					: null;
 				if (tomlResult && !tomlResult?.ok) {
@@ -315,31 +488,143 @@ function AgentForm({ agent, onSave, onCancel }: AgentFormProps): VNode {
 				<button
 					type="button"
 					className="text-xs text-[var(--muted)] text-left flex items-center gap-1"
-					onClick={() => setPresetOpen(!presetOpen)}
+					onClick={() => setCapabilitiesOpen(!capabilitiesOpen)}
 				>
-					<span style={{ fontSize: "0.6rem" }}>{presetOpen ? "\u25BC" : "\u25B6"}</span>
-					Spawn Settings (TOML)
+					<span style={{ fontSize: "0.6rem" }}>{capabilitiesOpen ? "\u25BC" : "\u25B6"}</span>
+					Capabilities
 				</button>
-				{presetOpen && (
-					<>
+				{capabilitiesOpen && (
+					<div className="flex flex-col gap-3 mt-1">
 						<p className="text-xs text-[var(--muted)] leading-relaxed" style={{ margin: 0 }}>
-							Configure how this agent behaves when spawned as a sub-agent via spawn_agent.
+							Control what this agent can access. Assign agents to channels via the Agent field in channel settings.
 						</p>
-						<textarea
-							className="provider-key-input"
-							value={presetToml}
-							onInput={(e) => setPresetToml(targetValue(e))}
-							placeholder={PRESET_TOML_PLACEHOLDER}
-							rows={6}
-							style={{
-								resize: "vertical",
-								fontFamily: "var(--font-mono)",
-								fontSize: "0.7rem",
-								whiteSpace: "pre",
-								overflowX: "auto",
-							}}
-						/>
-					</>
+
+						{/* MCP Server Access */}
+						<fieldset className="flex flex-col gap-1 border border-[var(--border)] rounded p-2">
+							<legend className="text-xs font-medium text-[var(--text-strong)] px-1">MCP Servers</legend>
+							<div className="flex gap-3 text-xs">
+								<label className="flex items-center gap-1">
+									<input type="radio" name="mcp-mode" checked={mcpMode === "all"} onChange={() => setMcpMode("all")} />
+									All
+								</label>
+								<label className="flex items-center gap-1">
+									<input
+										type="radio"
+										name="mcp-mode"
+										checked={mcpMode === "allow"}
+										onChange={() => setMcpMode("allow")}
+									/>
+									Only selected
+								</label>
+								<label className="flex items-center gap-1">
+									<input
+										type="radio"
+										name="mcp-mode"
+										checked={mcpMode === "deny"}
+										onChange={() => setMcpMode("deny")}
+									/>
+									All except
+								</label>
+							</div>
+							{mcpMode !== "all" && availableMcpServers.length > 0 && (
+								<div className="flex flex-col gap-1 mt-1">
+									{availableMcpServers.map((s) => (
+										<label key={s.name} className="flex items-center gap-1 text-xs">
+											<input
+												type="checkbox"
+												checked={mcpServers.includes(s.name)}
+												onChange={(e) => {
+													const checked = (e.target as HTMLInputElement).checked;
+													setMcpServers(checked ? [...mcpServers, s.name] : mcpServers.filter((n) => n !== s.name));
+												}}
+											/>
+											{s.display_name || s.name}
+											{!s.enabled && <span className="text-[var(--muted)]">(disabled)</span>}
+										</label>
+									))}
+								</div>
+							)}
+							{mcpMode !== "all" && availableMcpServers.length === 0 && (
+								<span className="text-xs text-[var(--muted)]">No MCP servers configured</span>
+							)}
+						</fieldset>
+
+						{/* Sandbox Mode */}
+						<fieldset className="flex flex-col gap-2 border border-[var(--border)] rounded p-2">
+							<legend className="text-xs font-medium text-[var(--text-strong)] px-1">Sandbox</legend>
+							<label className="flex flex-col gap-1 text-xs">
+								<span className="text-[var(--muted)]">Mode</span>
+								<select
+									className="provider-key-input"
+									value={sandboxMode}
+									onChange={(e) => setSandboxMode(targetValue(e))}
+									style={{ fontSize: "0.75rem", padding: "3px 6px" }}
+								>
+									<option value="">Inherit global</option>
+									<option value="all">Always sandbox</option>
+									<option value="off">No sandbox</option>
+									<option value="non-main">Non-main only</option>
+								</select>
+							</label>
+						</fieldset>
+
+						{/* Skills */}
+						<fieldset className="flex flex-col gap-2 border border-[var(--border)] rounded p-2">
+							<legend className="text-xs font-medium text-[var(--text-strong)] px-1">Skills</legend>
+							<label className="flex flex-col gap-1">
+								<span className="text-xs text-[var(--muted)]">Allowed (comma-separated, empty = all)</span>
+								<input
+									type="text"
+									className="provider-key-input"
+									value={skillsAllow}
+									onInput={(e) => {
+										const val = targetValue(e);
+										setSkillsAllow(val);
+										setSkillsAllowSet(val.trim().length > 0);
+									}}
+									placeholder="web_search, research"
+									style={{ fontSize: "0.75rem" }}
+								/>
+							</label>
+							<label className="flex flex-col gap-1">
+								<span className="text-xs text-[var(--muted)]">Denied (comma-separated)</span>
+								<input
+									type="text"
+									className="provider-key-input"
+									value={skillsDeny}
+									onInput={(e) => setSkillsDeny(targetValue(e))}
+									placeholder="gaming, social-media"
+									style={{ fontSize: "0.75rem" }}
+								/>
+							</label>
+						</fieldset>
+
+						{/* Advanced TOML fallback */}
+						<button
+							type="button"
+							className="text-xs text-[var(--muted)] text-left flex items-center gap-1"
+							onClick={() => setAdvancedTomlOpen(!advancedTomlOpen)}
+						>
+							<span style={{ fontSize: "0.6rem" }}>{advancedTomlOpen ? "\u25BC" : "\u25B6"}</span>
+							Advanced TOML
+						</button>
+						{advancedTomlOpen && (
+							<textarea
+								className="provider-key-input"
+								value={presetToml}
+								onInput={(e) => setPresetToml(targetValue(e))}
+								placeholder={PRESET_TOML_PLACEHOLDER}
+								rows={6}
+								style={{
+									resize: "vertical",
+									fontFamily: "var(--font-mono)",
+									fontSize: "0.7rem",
+									whiteSpace: "pre",
+									overflowX: "auto",
+								}}
+							/>
+						)}
+					</div>
 				)}
 			</div>
 
@@ -753,8 +1038,8 @@ function AgentsPageComponent({ subPath }: { subPath?: string }): VNode {
 					<div className="flex flex-col gap-1">
 						<h3 className="text-xs font-medium text-[var(--muted)]">Chat Agents</h3>
 						<p className="text-xs text-[var(--muted)] leading-relaxed" style={{ margin: 0 }}>
-							Persistent identities you can select in chat. Each chat agent has its own memory, system prompt, sessions,
-							and fallback setting.
+							Persistent identities with their own memory, system prompt, sessions, and capability boundaries (model,
+							MCP servers, sandbox policy, skills). Assign agents to channels for different users or contexts.
 						</p>
 					</div>
 					<div className="flex flex-col gap-2">

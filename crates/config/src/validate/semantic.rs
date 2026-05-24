@@ -1118,4 +1118,41 @@ pub(super) fn check_file_references(
             }
         }
     }
+
+    // Agent preset MCP allow/deny server validation — warn on unknown server names.
+    // Merge servers from both moltis.toml [mcp.servers] and the persistent
+    // mcp-servers.json registry file so we don't false-positive on servers
+    // added via the API.
+    let mut known_mcp_servers: std::collections::HashSet<String> = config
+        .mcp
+        .servers
+        .keys()
+        .map(|k| k.as_str().to_string())
+        .collect();
+    let registry_path = crate::data_dir().join("mcp-servers.json");
+    if let Ok(data) = std::fs::read_to_string(&registry_path)
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&data)
+        && let Some(servers) = json.get("servers").and_then(|v| v.as_object())
+    {
+        known_mcp_servers.extend(servers.keys().cloned());
+    }
+    for (preset_name, preset) in &config.agents.presets {
+        let servers = match &preset.mcp {
+            crate::schema::PresetMcpPolicy::Allow(s) | crate::schema::PresetMcpPolicy::Deny(s) => s,
+            crate::schema::PresetMcpPolicy::All => continue,
+        };
+        for server in servers {
+            if !known_mcp_servers.contains(server.as_str()) {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Warning,
+                    category: "agents",
+                    path: format!("agents.presets.{preset_name}.mcp"),
+                    message: format!(
+                        "MCP server '{}' referenced in preset but not configured in [mcp.servers] or mcp-servers.json",
+                        server
+                    ),
+                });
+            }
+        }
+    }
 }

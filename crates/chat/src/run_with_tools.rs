@@ -239,8 +239,30 @@ pub(crate) async fn run_with_tools(
     // Layer 1: instruct the LLM to write speech-friendly output when voice is active.
     let system_prompt = apply_voice_reply_suffix(system_prompt, desired_reply_medium);
 
-    // Determine sandbox mode for this session.
+    // Apply per-agent sandbox mode override, then determine sandbox mode.
     let session_is_sandboxed = if let Some(router) = state.sandbox_router() {
+        // If the agent preset has a sandbox mode override, apply it as a
+        // per-session override so the exec tool inherits the agent's policy.
+        // - "all"      → force sandbox on
+        // - "off"      → force sandbox off
+        // - "non-main" → remove override, let the router's global NonMain
+        //                 logic decide (sandboxes non-main sessions only)
+        // - absent     → remove any stale override from a previous agent
+        if let Some(preset) = persona.config.agents.get_preset(agent_id) {
+            match preset.sandbox.mode {
+                Some(moltis_config::schema::PresetSandboxMode::All) => {
+                    router.set_override(session_key, true).await
+                },
+                Some(moltis_config::schema::PresetSandboxMode::Off) => {
+                    router.set_override(session_key, false).await
+                },
+                _ => router.remove_override(session_key).await,
+            }
+        } else {
+            // No preset for this agent — clear any stale override from
+            // a previously assigned agent so the global mode applies.
+            router.remove_override(session_key).await;
+        }
         router.is_sandboxed(session_key).await
     } else {
         false

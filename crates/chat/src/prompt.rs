@@ -5,9 +5,12 @@ use std::sync::Arc;
 use {serde_json::Value, tracing::warn};
 
 use {
-    moltis_agents::prompt::{
-        PromptBuildLimits, PromptHostRuntimeContext, PromptModeRuntimeContext, PromptNodeInfo,
-        PromptNodesRuntimeContext, PromptRuntimeContext, PromptSandboxRuntimeContext,
+    moltis_agents::{
+        prompt::{
+            PromptBuildLimits, PromptHostRuntimeContext, PromptModeRuntimeContext, PromptNodeInfo,
+            PromptNodesRuntimeContext, PromptRuntimeContext, PromptSandboxRuntimeContext,
+        },
+        tool_registry::ToolSource,
     },
     moltis_config::{AgentMemoryWriteMode, LoadedWorkspaceMarkdown, MemoryStyle, PromptMemoryMode},
     moltis_sessions::{metadata::SessionEntry, state_store::SessionStateStore},
@@ -312,6 +315,42 @@ pub(crate) async fn discover_skills_if_enabled(
     }
 }
 
+/// Apply per-agent skill policy to a discovered skill list.
+///
+/// When the agent preset has a `skills.allow` list, only skills matching
+/// by name or category are kept. Skills in `skills.deny` are then removed.
+pub(crate) fn filter_skills_for_agent(
+    skills: Vec<moltis_skills::types::SkillMetadata>,
+    policy: &moltis_config::schema::PresetSkillPolicy,
+) -> Vec<moltis_skills::types::SkillMetadata> {
+    if policy.is_empty() {
+        return skills;
+    }
+    skills
+        .into_iter()
+        .filter(|s| {
+            // If allow is Some, must match by name or category.
+            // Some(vec![]) means "no skills allowed" — filters everything.
+            if let Some(ref allow) = policy.allow
+                && !allow
+                    .iter()
+                    .any(|a| a == &s.name || s.category.as_deref().is_some_and(|cat| a == cat))
+            {
+                return false;
+            }
+            // Deny by name or category (if present).
+            if let Some(ref deny) = policy.deny
+                && deny
+                    .iter()
+                    .any(|d| d == &s.name || s.category.as_deref().is_some_and(|cat| d == cat))
+            {
+                return false;
+            }
+            true
+        })
+        .collect()
+}
+
 pub(crate) fn resolve_channel_runtime_context(
     session_key: &str,
     session_entry: Option<&SessionEntry>,
@@ -537,12 +576,28 @@ pub(crate) fn apply_runtime_tool_filters(
     };
 
     let policy = resolve_effective_policy(config, policy_context);
-    // NOTE: Do not globally restrict tools by discovered skill `allowed_tools`.
-    // Skills are always discovered for prompt injection; applying those lists at
-    // runtime can unintentionally remove unrelated tools (for example, leaving
-    // only `web_fetch` and preventing `create_skill` from being called).
-    // Tool availability here is controlled by configured runtime policy.
-    base_registry.clone_allowed_by(|name| policy.is_allowed(name))
+
+    // Resolve MCP allow-list: if the agent preset uses Allow mode, only
+    // tools from listed servers pass through. This is handled here (not
+    // in the policy deny layer) because ToolPolicy's deny-wins-over-allow
+    // semantics can't express "deny all MCP except these servers".
+    let mcp_allow: Option<&[moltis_config::schema::McpServerId]> = config
+        .agents
+        .get_preset(&policy_context.agent_id)
+        .and_then(|p| match &p.mcp {
+            moltis_config::schema::PresetMcpPolicy::Allow(servers) => Some(servers.as_slice()),
+            _ => None,
+        });
+
+    base_registry.clone_allowed_entries(|name, source| {
+        if !policy.is_allowed(name) {
+            return false;
+        }
+        if let (Some(allowed_servers), ToolSource::Mcp { server }) = (mcp_allow, source) {
+            return allowed_servers.iter().any(|allowed| allowed == server);
+        }
+        true
+    })
 }
 
 /// Build a `PolicyContext` from runtime context and request parameters.
@@ -571,5 +626,132 @@ pub(crate) fn build_policy_context(
         sandboxed: runtime_context
             .and_then(|rc| rc.sandbox.as_ref())
             .is_some_and(|s| s.exec_sandboxed),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DummyTool(&'static str);
+
+    #[async_trait::async_trait]
+    impl moltis_agents::tool_registry::AgentTool for DummyTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(&self, _params: Value) -> anyhow::Result<Value> {
+            Ok(serde_json::json!({}))
+        }
+    }
+
+    fn registry_with_mcp_tools() -> moltis_agents::tool_registry::ToolRegistry {
+        let mut registry = moltis_agents::tool_registry::ToolRegistry::new();
+        registry.register(Box::new(DummyTool("exec")));
+        registry.register(Box::new(DummyTool("mcp__github__builtin_named_like_mcp")));
+        registry.register_mcp(Box::new(DummyTool("mcp__github__search")), "github".into());
+        registry.register_mcp(Box::new(DummyTool("mcp__memory__store")), "memory".into());
+        registry
+    }
+
+    fn unrestricted_policy_context(agent_id: &str) -> PolicyContext {
+        PolicyContext {
+            agent_id: agent_id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn mcp_allow_empty_denies_all_mcp_tools_only() {
+        let mut config = moltis_config::MoltisConfig::default();
+        config.tools.policy.allow = vec!["*".into()];
+        config
+            .agents
+            .presets
+            .insert("locked".into(), moltis_config::schema::AgentPreset {
+                mcp: moltis_config::schema::PresetMcpPolicy::Allow(vec![]),
+                ..Default::default()
+            });
+
+        let filtered = apply_runtime_tool_filters(
+            &registry_with_mcp_tools(),
+            &config,
+            &[],
+            false,
+            &unrestricted_policy_context("locked"),
+        );
+
+        assert!(filtered.get("exec").is_some());
+        assert!(
+            filtered
+                .get("mcp__github__builtin_named_like_mcp")
+                .is_some()
+        );
+        assert!(filtered.get("mcp__github__search").is_none());
+        assert!(filtered.get("mcp__memory__store").is_none());
+    }
+
+    #[test]
+    fn mcp_allow_keeps_only_listed_mcp_server() {
+        let mut config = moltis_config::MoltisConfig::default();
+        config.tools.policy.allow = vec!["*".into()];
+        config
+            .agents
+            .presets
+            .insert("github-only".into(), moltis_config::schema::AgentPreset {
+                mcp: moltis_config::schema::PresetMcpPolicy::Allow(vec!["github".into()]),
+                ..Default::default()
+            });
+
+        let filtered = apply_runtime_tool_filters(
+            &registry_with_mcp_tools(),
+            &config,
+            &[],
+            false,
+            &unrestricted_policy_context("github-only"),
+        );
+
+        assert!(filtered.get("exec").is_some());
+        assert!(filtered.get("mcp__github__search").is_some());
+        assert!(filtered.get("mcp__memory__store").is_none());
+    }
+
+    #[test]
+    fn skill_policy_allows_then_denies_by_name_or_category() {
+        let skills = vec![
+            moltis_skills::types::SkillMetadata {
+                name: "web-search".into(),
+                category: Some("research".into()),
+                ..Default::default()
+            },
+            moltis_skills::types::SkillMetadata {
+                name: "games".into(),
+                category: Some("gaming".into()),
+                ..Default::default()
+            },
+            moltis_skills::types::SkillMetadata {
+                name: "writer".into(),
+                category: Some("creative".into()),
+                ..Default::default()
+            },
+        ];
+        let policy = moltis_config::schema::PresetSkillPolicy {
+            allow: Some(vec!["research".into(), "writer".into()]),
+            deny: Some(vec!["writer".into()]),
+        };
+
+        let filtered = filter_skills_for_agent(skills, &policy);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "web-search");
     }
 }

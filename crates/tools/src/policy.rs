@@ -162,9 +162,20 @@ pub fn resolve_effective_policy(
     if let Some(preset) = config.agents.get_preset(&context.agent_id) {
         let mut deny = preset.tools.deny.clone();
 
-        // Translate MCP server deny list into tool deny patterns.
-        for server in &preset.mcp.deny_servers {
-            deny.push(format!("mcp__{server}__*"));
+        // Translate MCP server policy into tool deny patterns.
+        match &preset.mcp {
+            moltis_config::schema::PresetMcpPolicy::All => {},
+            moltis_config::schema::PresetMcpPolicy::Deny(servers) => {
+                for server in servers {
+                    deny.push(server.to_deny_pattern());
+                }
+            },
+            moltis_config::schema::PresetMcpPolicy::Allow(_) => {
+                // Allow-list enforcement is handled in apply_runtime_tool_filters
+                // (prompt.rs) where the full tool registry is available, not here
+                // in the policy layer — because the deny-wins-over-allow semantics
+                // of ToolPolicy prevent expressing "deny all MCP except these".
+            },
         }
 
         let p = ToolPolicy {
@@ -219,9 +230,14 @@ pub fn resolve_effective_policy(
     effective
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stub_mcp_entry() -> moltis_config::schema::McpServerEntry {
+        serde_json::from_value(serde_json::json!({})).expect("empty MCP entry")
+    }
 
     #[test]
     fn test_allow_all() {
@@ -517,9 +533,7 @@ mod tests {
         cfg.agents
             .presets
             .insert("restricted".into(), moltis_config::schema::AgentPreset {
-                mcp: moltis_config::schema::PresetMcpPolicy {
-                    deny_servers: vec!["home-assistant".into()],
-                },
+                mcp: moltis_config::schema::PresetMcpPolicy::Deny(vec!["home-assistant".into()]),
                 ..Default::default()
             });
 
@@ -536,6 +550,85 @@ mod tests {
         // MCP tools from denied server are blocked.
         assert!(!policy.is_allowed("mcp__home-assistant__turn_on"));
         assert!(!policy.is_allowed("mcp__home-assistant__get_state"));
+    }
+
+    #[test]
+    fn test_resolve_agent_mcp_allow_does_not_add_deny_patterns() {
+        // Allow-list enforcement is in apply_runtime_tool_filters (prompt.rs),
+        // not in the policy deny layer, because deny-wins-over-allow can't
+        // express "deny all MCP except these". The policy layer should NOT
+        // add any MCP deny patterns for Allow mode.
+        let mut cfg = moltis_config::MoltisConfig::default();
+        cfg.tools.policy.allow = vec!["*".into()];
+
+        cfg.mcp.servers.insert("github".into(), stub_mcp_entry());
+        cfg.mcp
+            .servers
+            .insert("home-assistant".into(), stub_mcp_entry());
+
+        cfg.agents
+            .presets
+            .insert("allow-only".into(), moltis_config::schema::AgentPreset {
+                mcp: moltis_config::schema::PresetMcpPolicy::Allow(vec!["github".into()]),
+                ..Default::default()
+            });
+
+        let ctx = PolicyContext {
+            agent_id: "allow-only".into(),
+            ..Default::default()
+        };
+        let policy = resolve_effective_policy(&cfg, &ctx);
+        // Policy layer allows everything — actual filtering happens at
+        // the tool registry level in apply_runtime_tool_filters.
+        assert!(policy.is_allowed("exec"));
+        assert!(policy.is_allowed("mcp__github__list_repos"));
+        assert!(policy.is_allowed("mcp__home-assistant__turn_on"));
+    }
+
+    #[test]
+    fn test_resolve_agent_mcp_all_is_default() {
+        let mut cfg = moltis_config::MoltisConfig::default();
+        cfg.tools.policy.allow = vec!["*".into()];
+        cfg.agents
+            .presets
+            .insert("open".into(), moltis_config::schema::AgentPreset {
+                mcp: moltis_config::schema::PresetMcpPolicy::All,
+                ..Default::default()
+            });
+
+        let ctx = PolicyContext {
+            agent_id: "open".into(),
+            ..Default::default()
+        };
+        let policy = resolve_effective_policy(&cfg, &ctx);
+        assert!(policy.is_allowed("mcp__github__list_repos"));
+        assert!(policy.is_allowed("mcp__home-assistant__turn_on"));
+    }
+
+    #[test]
+    fn test_resolve_agent_mcp_allow_empty_passes_policy() {
+        // Empty allow-list enforcement happens in apply_runtime_tool_filters.
+        // Policy layer should pass MCP tools through.
+        let mut cfg = moltis_config::MoltisConfig::default();
+        cfg.tools.policy.allow = vec!["*".into()];
+
+        cfg.mcp.servers.insert("github".into(), stub_mcp_entry());
+
+        cfg.agents
+            .presets
+            .insert("locked".into(), moltis_config::schema::AgentPreset {
+                mcp: moltis_config::schema::PresetMcpPolicy::Allow(vec![]),
+                ..Default::default()
+            });
+
+        let ctx = PolicyContext {
+            agent_id: "locked".into(),
+            ..Default::default()
+        };
+        let policy = resolve_effective_policy(&cfg, &ctx);
+        assert!(policy.is_allowed("exec"));
+        // Policy passes — actual MCP blocking in apply_runtime_tool_filters
+        assert!(policy.is_allowed("mcp__github__list_repos"));
     }
 
     #[test]
