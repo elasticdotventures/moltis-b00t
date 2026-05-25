@@ -120,7 +120,7 @@ test.describe("Agents settings page", () => {
 		await expect(page.getByRole("tab", { name: /Modes/ })).toBeVisible();
 
 		const chatPanel = page.getByLabel("Chat Agents panel");
-		await expect(chatPanel.getByText("Persistent identities you can select in chat.", { exact: false })).toBeVisible();
+		await expect(chatPanel.getByText("Persistent identities with their own memory", { exact: false })).toBeVisible();
 
 		await page.getByRole("tab", { name: /Modes/ }).click();
 		const modesPanel = page.getByLabel("Modes panel");

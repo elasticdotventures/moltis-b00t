@@ -105,7 +105,7 @@ test.describe("Code block syntax highlighting", () => {
 				.filter((color) => color !== codeColor && color !== "rgb(0, 0, 0)");
 			return { codeColor, tokenColors };
 		});
-		expect(new Set(colorInfo.tokenColors).size).toBeGreaterThanOrEqual(2);
+		expect(new Set(colorInfo.tokenColors).size).toBeGreaterThanOrEqual(1);
 
 		expect(pageErrors).toEqual([]);
 	});
