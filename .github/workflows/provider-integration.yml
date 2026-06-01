@@ -67,6 +67,7 @@ jobs:
   provider-tests:
     name: ${{ matrix.provider }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
     # Scheduled/manual provider checks report outages without blocking by default.
@@ -278,6 +279,7 @@ jobs:
   provider-e2e-scenarios:
     name: Provider E2E Scenarios
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     continue-on-error: ${{ inputs.fail_on_error != true }}
@@ -312,6 +314,7 @@ jobs:
   cloud-sandbox-live-e2e:
     name: Cloud Sandbox Live E2E
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     env:
@@ -393,6 +396,7 @@ jobs:
   openai-live-e2e:
     name: OpenAI Live E2E
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     continue-on-error: ${{ inputs.fail_on_error != true }}
@@ -478,6 +482,7 @@ jobs:
   ollama-qwen-live-e2e:
     name: Ollama Qwen Live E2E
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
     continue-on-error: ${{ inputs.fail_on_error != true }}
@@ -565,6 +570,7 @@ jobs:
   summary:
     name: Integration Summary
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
     needs:
