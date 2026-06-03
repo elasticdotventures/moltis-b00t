@@ -5,7 +5,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
 
 use {
     futures::StreamExt,
@@ -44,6 +44,24 @@ fn make_provider(model: &str) -> OpenAiProvider {
         BASE_URL.to_string(),
         "zai".to_string(),
     )
+}
+
+async fn probe_with_retries(model: &str) -> Result<(), String> {
+    let mut last_error = String::new();
+
+    for attempt in 1..=3 {
+        match make_provider(model).probe().await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = error.to_string();
+                if attempt < 3 {
+                    tokio::time::sleep(Duration::from_secs(attempt)).await;
+                }
+            },
+        }
+    }
+
+    Err(last_error)
 }
 
 fn weather_tool() -> serde_json::Value {
@@ -242,9 +260,9 @@ async fn catalog_models_are_live() {
     let mut alive = Vec::new();
     let mut dead = Vec::new();
     for &m in KNOWN_MODELS {
-        match make_provider(m).probe().await {
+        match probe_with_retries(m).await {
             Ok(()) => alive.push(m),
-            Err(e) => dead.push((m, e.to_string())),
+            Err(e) => dead.push((m, e)),
         }
     }
     eprintln!("\n=== Z.AI Model Catalog Health ===");
