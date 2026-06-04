@@ -409,48 +409,48 @@ not change existing login routes."
 
 # My parallel issue workflow
 
-<div class="mt-3 max-w-5xl text-xl leading-8 text-gray-600">
+<div class="mt-2 max-w-5xl text-lg leading-7 text-gray-600">
   The goal is not one giant AI session. It is many isolated, reviewable workstreams.
 </div>
 
-<div class="mt-6 grid grid-cols-3 gap-4">
-  <div class="rounded-2xl border border-fuchsia-200 bg-fuchsia-50 px-5 py-4 shadow-sm">
+<div class="mt-4 grid grid-cols-3 gap-3">
+  <div class="rounded-2xl border border-fuchsia-200 bg-fuchsia-50 px-4 py-2 shadow-sm">
     <div class="text-xs uppercase tracking-[0.18em] text-fuchsia-700">Queue</div>
-    <div class="mt-2 text-xl font-semibold text-gray-950">Issues first</div>
-    <div class="mt-2 text-sm leading-6 text-gray-700">I look at issues, with bugs first, because I want Moltis to be stable.</div>
+    <div class="mt-1 text-lg font-semibold text-gray-950">Issues first</div>
+    <div class="mt-1 text-sm leading-5 text-gray-700">Bugs first, because I want Moltis to be stable.</div>
   </div>
-  <div class="rounded-2xl border border-cyan-200 bg-cyan-50 px-5 py-4 shadow-sm">
+  <div class="rounded-2xl border border-cyan-200 bg-cyan-50 px-4 py-2 shadow-sm">
     <div class="text-xs uppercase tracking-[0.18em] text-cyan-700">Isolation</div>
-    <div class="mt-2 text-xl font-semibold text-gray-950">One workspace per PR</div>
-    <div class="mt-2 text-sm leading-6 text-gray-700">Superset or Arbor creates a separate workspace for each issue or pull request.</div>
+    <div class="mt-1 text-lg font-semibold text-gray-950">One workspace per PR</div>
+    <div class="mt-1 text-sm leading-5 text-gray-700">Separate workspace for each issue or pull request.</div>
   </div>
-  <div class="rounded-2xl border border-cyan-200 bg-cyan-50 px-5 py-4 shadow-sm">
+  <div class="rounded-2xl border border-cyan-200 bg-cyan-50 px-4 py-2 shadow-sm">
     <div class="text-xs uppercase tracking-[0.18em] text-cyan-700">Agents</div>
-    <div class="mt-2 text-xl font-semibold text-gray-950">OpenCode + Claude</div>
-    <div class="mt-2 text-sm leading-6 text-gray-700">I use both 20x memberships and burn through more than 10B tokens/month.</div>
+    <div class="mt-1 text-lg font-semibold text-gray-950">OpenCode + Claude</div>
+    <div class="mt-1 text-sm leading-5 text-gray-700">Both 20x memberships, more than 10B tokens/month.</div>
   </div>
 </div>
 
-<div class="mt-5 grid grid-cols-3 gap-4">
-  <div class="rounded-2xl border border-cyan-200 bg-cyan-50 px-5 py-4 shadow-sm">
+<div class="mt-3 grid grid-cols-3 gap-3">
+  <div class="rounded-2xl border border-cyan-200 bg-cyan-50 px-4 py-2 shadow-sm">
     <div class="text-xs uppercase tracking-[0.18em] text-cyan-700">Adversarial review</div>
-    <div class="mt-2 text-xl font-semibold text-gray-950">Agents check agents</div>
-    <div class="mt-2 text-sm leading-6 text-gray-700">When needed, I ask one model to review the other. It often finds fixes or a simpler approach.</div>
+    <div class="mt-1 text-lg font-semibold text-gray-950">Agents check agents</div>
+    <div class="mt-1 text-sm leading-5 text-gray-700">One model reviews another for fixes or simpler approaches.</div>
   </div>
-  <div class="rounded-2xl border border-gray-200 bg-white px-5 py-4 shadow-sm">
+  <div class="rounded-2xl border border-gray-200 bg-white px-4 py-2 shadow-sm">
     <div class="text-xs uppercase tracking-[0.18em] text-gray-500">External reviewer</div>
-    <div class="mt-2 text-xl font-semibold text-gray-950">Greptile on GitHub</div>
-    <div class="mt-2 text-sm leading-6 text-gray-700">I ask agents to work through Greptile feedback until it reaches 5/5. The number is imperfect, but useful.</div>
+    <div class="mt-1 text-lg font-semibold text-gray-950">Greptile on GitHub</div>
+    <div class="mt-1 text-sm leading-5 text-gray-700">Agents work through feedback until it reaches 5/5.</div>
   </div>
-  <div class="rounded-2xl border border-fuchsia-200 bg-fuchsia-50 px-5 py-4 shadow-sm">
+  <div class="rounded-2xl border border-fuchsia-200 bg-fuchsia-50 px-4 py-2 shadow-sm">
     <div class="text-xs uppercase tracking-[0.18em] text-fuchsia-700">Human owner</div>
-    <div class="mt-2 text-xl font-semibold text-gray-950">Fast final review</div>
-    <div class="mt-2 text-sm leading-6 text-gray-700">I review quickly, merge, then E2E and release gates catch regressions before releases.</div>
+    <div class="mt-1 text-lg font-semibold text-gray-950">Fast final review</div>
+    <div class="mt-1 text-sm leading-5 text-gray-700">I review, merge, then E2E and release gates catch regressions.</div>
   </div>
 </div>
 
-<div class="mt-5 rounded-2xl border border-cyan-300 bg-cyan-50 px-6 py-4 text-xl leading-8 shadow-sm">
-  This lets me keep multiple issues and PRs moving at once. I am building <strong>Polyphony</strong> to automate more of this: <span class="text-cyan-700">https://polyphony.to</span>
+<div class="mt-3 rounded-2xl border border-cyan-300 bg-cyan-50 px-5 py-2 text-base leading-6 shadow-sm">
+  This keeps multiple issues moving at once. I am building <strong>Polyphony</strong> to automate more of this: <span class="text-cyan-700">https://polyphony.to</span>
 </div>
 
 <!--
