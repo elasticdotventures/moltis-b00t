@@ -1,4 +1,7 @@
-use {reqwest::header::HeaderMap, secrecy::Secret};
+use {
+    reqwest::header::HeaderMap,
+    secrecy::{ExposeSecret, Secret},
+};
 
 use crate::{
     Error, Result,
@@ -36,10 +39,15 @@ pub async fn request_device_code_with_headers(
     config: &OAuthConfig,
     extra_headers: Option<&HeaderMap>,
 ) -> Result<DeviceCodeResponse> {
+    let mut form = vec![("client_id", config.client_id.as_str()), ("scope", "")];
+    if let Some(client_secret) = &config.client_secret {
+        form.push(("client_secret", client_secret.expose_secret().as_str()));
+    }
+
     let mut req = client
         .post(&config.auth_url)
         .header("Accept", "application/json")
-        .form(&[("client_id", config.client_id.as_str()), ("scope", "")]);
+        .form(&form);
 
     if let Some(headers) = extra_headers {
         req = req.headers(headers.clone());
@@ -86,14 +94,19 @@ pub async fn poll_for_token_with_headers(
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
 
+        let mut form = vec![
+            ("client_id", config.client_id.as_str()),
+            ("device_code", device_code),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+        ];
+        if let Some(client_secret) = &config.client_secret {
+            form.push(("client_secret", client_secret.expose_secret().as_str()));
+        }
+
         let mut req = client
             .post(&config.token_url)
             .header("Accept", "application/json")
-            .form(&[
-                ("client_id", config.client_id.as_str()),
-                ("device_code", device_code),
-                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-            ]);
+            .form(&form);
 
         if let Some(headers) = extra_headers {
             req = req.headers(headers.clone());
@@ -146,6 +159,7 @@ mod tests {
     fn test_config(auth_url: String, token_url: String) -> OAuthConfig {
         OAuthConfig {
             client_id: "test-client".into(),
+            client_secret: None,
             auth_url,
             token_url,
             redirect_uri: String::new(),
@@ -275,6 +289,37 @@ mod tests {
         let resp = request_device_code_with_headers(&client, &config, Some(&headers))
             .await
             .unwrap();
+        assert_eq!(resp.device_code, "dc");
+    }
+
+    #[tokio::test]
+    async fn request_device_code_sends_client_secret_when_configured() {
+        let app = Router::new().route(
+            "/device/code",
+            post(
+                |Form(form): Form<std::collections::HashMap<String, String>>| async move {
+                    assert_eq!(
+                        form.get("client_id").map(String::as_str),
+                        Some("test-client")
+                    );
+                    assert_eq!(
+                        form.get("client_secret").map(String::as_str),
+                        Some("test-secret")
+                    );
+                    axum::Json(serde_json::json!({
+                        "device_code": "dc",
+                        "user_code": "CODE",
+                        "verification_uri": "https://example.com",
+                    }))
+                },
+            ),
+        );
+        let base = start_mock(app).await;
+        let mut config = test_config(format!("{base}/device/code"), String::new());
+        config.client_secret = Some(Secret::new("test-secret".to_string()));
+
+        let client = reqwest::Client::new();
+        let resp = request_device_code(&client, &config).await.unwrap();
         assert_eq!(resp.device_code, "dc");
     }
 

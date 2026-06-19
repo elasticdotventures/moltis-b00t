@@ -77,7 +77,7 @@ Usage:
 
 Options:
     --no-homebrew       Skip Homebrew even if available (macOS)
-    --method=METHOD     Force installation method: homebrew, binary, deb, rpm, arch, snap, source
+    --method=METHOD     Force installation method: homebrew, binary, deb, rpm, arch, appimage, snap, source, proxmox
     --version=VERSION   Install a specific version (default: latest)
     -h, --help          Show this help message
 
@@ -415,6 +415,51 @@ install_arch() {
     success "Moltis installed via Arch package"
 }
 
+install_appimage() {
+    os="$1"
+    arch="$2"
+    version="$3"
+
+    if [ "$os" != "linux" ]; then
+        error "AppImage installation is only supported on Linux"
+    fi
+
+    case "$arch" in
+        x86_64|aarch64)
+            ;;
+        *)
+            error "Unsupported architecture for AppImage: $arch"
+            ;;
+    esac
+
+    tag=$(release_tag "$version")
+    appimage_file="moltis-${version}-${arch}.AppImage"
+    url="https://github.com/${GITHUB_REPO}/releases/download/${tag}/${appimage_file}"
+    checksum_url="${url}.sha256"
+
+    info "Downloading ${appimage_file}..."
+
+    tmpdir=$(mktemp -d)
+    trap 'rm -rf "$tmpdir"' EXIT
+
+    download "$url" "$tmpdir/$appimage_file" || error "Failed to download $appimage_file"
+
+    if download "$checksum_url" "$tmpdir/checksum.sha256" 2>/dev/null; then
+        expected_sha=$(cut -d' ' -f1 "$tmpdir/checksum.sha256")
+        verify_checksum "$tmpdir/$appimage_file" "$expected_sha"
+        info "Checksum verified"
+    else
+        warn "Could not download checksum file, skipping verification"
+    fi
+
+    ensure_install_dir
+    mv "$tmpdir/$appimage_file" "$INSTALL_DIR/$BINARY_NAME"
+    chmod +x "$INSTALL_DIR/$BINARY_NAME"
+
+    success "Moltis AppImage installed to $INSTALL_DIR/$BINARY_NAME"
+    add_to_path_instructions
+}
+
 install_snap() {
     info "Installing via Snap..."
 
@@ -425,6 +470,68 @@ install_snap() {
     sudo snap install moltis
 
     success "Moltis installed via Snap"
+}
+
+detect_proxmox() {
+    command_exists pveversion && [ -d /etc/pve ]
+}
+
+install_proxmox() {
+    info "Proxmox VE detected — installing Moltis as an LXC container..."
+
+    if ! detect_proxmox; then
+        error "This does not appear to be a Proxmox VE host."
+    fi
+
+    PROXMOX_REPO_URL="https://raw.githubusercontent.com/moltis-org/ProxmoxVED/feat/moltis"
+    PROXMOX_SCRIPT_URL="$PROXMOX_REPO_URL/ct/moltis.sh"
+
+    tmpdir=$(mktemp -d)
+    trap 'rm -rf "$tmpdir"' EXIT
+    proxmox_script="$tmpdir/moltis-proxmox.sh"
+    patched_script="$tmpdir/moltis-proxmox-patched.sh"
+
+    download "$PROXMOX_SCRIPT_URL" "$proxmox_script" || error "Failed to download Proxmox helper"
+
+    # Patch the fetched helper at launch time for Moltis-specific fixes that live
+    # in remote community-scripts files: keep /usr/bin/update on the Moltis fork,
+    # make the Docker prompt safe when lxc-attach has no interactive stdin, and
+    # keep optional CA certificate display failures from removing the container.
+    awk -v repo_url="$PROXMOX_REPO_URL" '
+        {
+            if ($0 ~ /^source <\(curl -fsSL / && !curl_patched) {
+                print "curl() {"
+                print "  case \"${*: -1}\" in"
+                print "    */install/moltis-install.sh)"
+                print "      command curl \"$@\" | sed '\''s|^[[:space:]]*read -r -p \".*Docker for sandbox support.*\" prompt$|if [[ -t 0 ]]; then &; else prompt=\"${MOLTIS_INSTALL_DOCKER:-no}\"; fi|'\''"
+                print "      ;;"
+                print "    *) command curl \"$@\" ;;"
+                print "  esac"
+                print "}"
+                curl_patched = 1
+            }
+            if ($0 == "CA_CERT=$(pct exec \"$CTID\" -- cat /etc/moltis/certs/ca.pem 2>/dev/null)" && !ca_cert_patched) {
+                sub(/\)$/, " || true)")
+                ca_cert_patched = 1
+            }
+            print
+            if ($0 == "description" && !patched) {
+                q = sprintf("%c", 39)
+                print "pct exec \"$CTID\" -- bash -c \"cat > /usr/bin/update <<" q "MOLTIS_UPDATE_EOF" q
+                print "bash -c \\\"\\$(curl -fsSL " repo_url "/ct/moltis.sh)\\\""
+                print "MOLTIS_UPDATE_EOF"
+                print "chmod +x /usr/bin/update\" || true"
+                patched = 1
+            }
+        }
+    ' "$proxmox_script" >"$patched_script"
+
+    grep -q 'curl()' "$patched_script" || error "Failed to apply Docker prompt patch to Proxmox helper"
+    grep -q 'MOLTIS_UPDATE_EOF' "$patched_script" || error "Failed to apply update URL patch to Proxmox helper"
+    grep -q 'cat /etc/moltis/certs/ca.pem 2>/dev/null || true' "$patched_script" || warn "Could not apply optional CA certificate patch to Proxmox helper"
+
+    info "Launching Proxmox VE helper script..."
+    bash "$patched_script"
 }
 
 install_from_source() {
@@ -528,8 +635,15 @@ main() {
             arch)
                 install_arch "$ARCH" "$VERSION"
                 ;;
+            appimage)
+                install_appimage "$OS" "$ARCH" "$VERSION"
+                ;;
             snap)
                 install_snap
+                ;;
+            proxmox)
+                install_proxmox
+                return
                 ;;
             source)
                 install_from_source "$VERSION"
@@ -537,6 +651,29 @@ main() {
             *)
                 error "Unknown installation method: $PREFERRED_METHOD"
                 ;;
+        esac
+    elif [ "$OS" = "linux" ] && detect_proxmox; then
+        info "Proxmox VE host detected"
+        printf "  Install as an LXC container (recommended) or directly on this host?\n"
+        printf "  ${BOLD}1)${NC} LXC container (isolated, easy to manage)\n"
+        printf "  ${BOLD}2)${NC} Install directly on this host\n"
+        printf "\n"
+        printf "  Choice [1]: "
+        read -r choice </dev/tty 2>/dev/null || choice="1"
+        choice="${choice:-1}"
+        if [ "$choice" = "1" ]; then
+            install_proxmox
+            return
+        fi
+        # Fall through to normal Linux install
+        DISTRO=$(detect_linux_distro)
+        case "$DISTRO" in
+            ubuntu|debian|linuxmint|pop|elementary|zorin)
+                install_deb "$ARCH" "$VERSION" ;;
+            fedora|rhel|centos|rocky|alma|ol)
+                install_rpm "$ARCH" "$VERSION" ;;
+            *)
+                install_binary "$OS" "$ARCH" "$VERSION" ;;
         esac
     elif [ "$OS" = "macos" ]; then
         # macOS: prefer Homebrew, fall back to binary

@@ -20,12 +20,31 @@ pub enum TransportType {
     #[default]
     Stdio,
     Sse,
+    #[serde(rename = "streamable-http", alias = "streamable_http", alias = "http")]
+    StreamableHttp,
+}
+
+impl std::fmt::Display for TransportType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stdio => write!(f, "stdio"),
+            Self::Sse => write!(f, "sse"),
+            Self::StreamableHttp => write!(f, "streamable-http"),
+        }
+    }
 }
 
 /// Manual OAuth override for MCP servers that don't support standard discovery.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpOAuthConfig {
     pub client_id: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "moltis_oauth::types::serialize_option_secret",
+        deserialize_with = "moltis_oauth::types::deserialize_option_secret"
+    )]
+    pub client_secret: Option<Secret<String>>,
     pub auth_url: String,
     pub token_url: String,
     #[serde(default)]
@@ -39,20 +58,25 @@ pub struct McpServerConfig {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
-    #[serde(default)]
-    pub env: HashMap<String, String>,
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        serialize_with = "serialize_secret_string_map",
+        deserialize_with = "deserialize_secret_string_map"
+    )]
+    pub env: HashMap<String, Secret<String>>,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<u64>,
     #[serde(default)]
     pub transport: TransportType,
-    /// URL for SSE transport. Required when `transport` is `Sse`.
+    /// URL for remote transport. Required when `transport` is `Sse` or `StreamableHttp`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_option_secret_string",
-        deserialize_with = "deserialize_option_secret_string"
+        serialize_with = "moltis_oauth::types::serialize_option_secret",
+        deserialize_with = "moltis_oauth::types::deserialize_option_secret"
     )]
     pub url: Option<Secret<String>>,
     /// Custom headers for remote HTTP/SSE transport.
@@ -197,26 +221,6 @@ impl McpRegistry {
     }
 }
 
-fn serialize_option_secret_string<S: serde::Serializer>(
-    secret: &Option<Secret<String>>,
-    serializer: S,
-) -> std::result::Result<S::Ok, S::Error> {
-    match secret {
-        Some(value) => serializer.serialize_some(value.expose_secret()),
-        None => serializer.serialize_none(),
-    }
-}
-
-fn deserialize_option_secret_string<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Option<Secret<String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let opt: Option<String> = Option::deserialize(deserializer)?;
-    Ok(opt.map(Secret::new))
-}
-
 fn serialize_secret_string_map<S: serde::Serializer>(
     values: &HashMap<String, Secret<String>>,
     serializer: S,
@@ -244,6 +248,19 @@ where
 #[cfg(test)]
 mod tests {
     use {super::*, secrecy::ExposeSecret};
+
+    #[test]
+    fn test_transport_type_deserialization() {
+        let json = r#"["stdio", "sse", "streamable-http", "streamable_http", "http"]"#;
+        let transports: Vec<TransportType> = serde_json::from_str(json).unwrap();
+        assert_eq!(transports, vec![
+            TransportType::Stdio,
+            TransportType::Sse,
+            TransportType::StreamableHttp,
+            TransportType::StreamableHttp,
+            TransportType::StreamableHttp,
+        ]);
+    }
 
     #[test]
     fn test_registry_add_remove() {
@@ -306,14 +323,14 @@ mod tests {
         reg.servers.insert("test".into(), McpServerConfig {
             command: "echo".into(),
             args: vec!["hello".into()],
-            env: HashMap::from([("FOO".into(), "bar".into())]),
+            env: HashMap::from([("FOO".into(), Secret::new("bar".into()))]),
             ..Default::default()
         });
         reg.save().unwrap();
 
         let loaded = McpRegistry::load(&path).unwrap();
         assert_eq!(loaded.servers.len(), 1);
-        assert_eq!(loaded.servers["test"].env["FOO"], "bar");
+        assert_eq!(loaded.servers["test"].env["FOO"].expose_secret(), "bar");
     }
 
     #[test]
@@ -343,5 +360,29 @@ mod tests {
             Some("https://example.com/mcp?api_key=secret-value")
         );
         assert_eq!(server.headers["x-api-key"].expose_secret(), "header-secret");
+    }
+
+    #[test]
+    fn test_registry_roundtrips_oauth_client_secret() {
+        let mut reg = McpRegistry::new();
+        reg.servers.insert("remote".into(), McpServerConfig {
+            oauth: Some(McpOAuthConfig {
+                client_id: "client".to_string(),
+                client_secret: Some(Secret::new("secret".to_string())),
+                auth_url: "https://auth.example.com/authorize".to_string(),
+                token_url: "https://auth.example.com/token".to_string(),
+                scopes: Vec::new(),
+            }),
+            ..Default::default()
+        });
+
+        let json = serde_json::to_string(&reg).unwrap();
+        let parsed: McpRegistry = serde_json::from_str(&json).unwrap();
+        let secret = parsed.servers["remote"]
+            .oauth
+            .as_ref()
+            .and_then(|oauth| oauth.client_secret.as_ref())
+            .map(ExposeSecret::expose_secret);
+        assert_eq!(secret.map(String::as_str), Some("secret"));
     }
 }

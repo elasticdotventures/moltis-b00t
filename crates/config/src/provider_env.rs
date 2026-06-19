@@ -92,6 +92,8 @@ pub fn normalize_provider_name(value: &str) -> Option<String> {
         "local" => "local-llm",
         "z-ai" | "z.ai" | "zhipu" | "zhipu-ai" => "zai",
         "zai-code" | "zai-coding" | "zhipu-code" => "zai-code",
+        "alibaba" | "alibaba-coding" | "dashscope-coding" => "alibaba-coding",
+        "near-ai" | "near-ai-cloud" => "nearai",
         other => other,
     };
 
@@ -145,6 +147,37 @@ mod tests {
             panic!("generic provider env should resolve");
         };
         assert_eq!(resolved.provider, "gemini");
+    }
+
+    #[test]
+    fn normalize_alibaba_coding_aliases() {
+        assert_eq!(
+            normalize_provider_name("alibaba"),
+            Some("alibaba-coding".into())
+        );
+        assert_eq!(
+            normalize_provider_name("alibaba-coding"),
+            Some("alibaba-coding".into())
+        );
+        assert_eq!(
+            normalize_provider_name("dashscope-coding"),
+            Some("alibaba-coding".into())
+        );
+        assert_eq!(
+            normalize_provider_name("ALIBABA_CODING"),
+            Some("alibaba-coding".into())
+        );
+    }
+
+    #[test]
+    fn normalize_nearai_aliases() {
+        for alias in &["nearai", "near-ai", "near-ai-cloud", "NEARAI"] {
+            assert_eq!(
+                normalize_provider_name(alias).as_deref(),
+                Some("nearai"),
+                "expected alias {alias:?} to normalize to \"nearai\""
+            );
+        }
     }
 
     #[test]
@@ -202,5 +235,42 @@ mod tests {
             generic_provider_env_source_for_provider("anthropic", &env_overrides).as_deref(),
             Some("env:PROVIDER+API_KEY")
         );
+    }
+
+    /// Every alias in `normalize_provider_name` must map to a canonical name
+    /// that exists in `KNOWN_PROVIDER_NAMES`.
+    #[test]
+    fn normalize_alias_outputs_are_in_canonical_list() {
+        use crate::schema::KNOWN_PROVIDER_NAMES;
+
+        let aliases = [
+            "claude",
+            "google",
+            "google-gemini",
+            "grok",
+            "local",
+            "z-ai",
+            "z.ai",
+            "zhipu",
+            "zhipu-ai",
+            "zai-code",
+            "zai-coding",
+            "zhipu-code",
+            "alibaba",
+            "alibaba-coding",
+            "dashscope-coding",
+            "nearai",
+            "near-ai",
+            "near-ai-cloud",
+        ];
+
+        for alias in aliases {
+            let canonical = normalize_provider_name(alias)
+                .unwrap_or_else(|| panic!("normalize_provider_name({alias:?}) returned None"));
+            assert!(
+                KNOWN_PROVIDER_NAMES.contains(&canonical.as_str()),
+                "alias \"{alias}\" normalizes to \"{canonical}\" which is not in KNOWN_PROVIDER_NAMES"
+            );
+        }
     }
 }

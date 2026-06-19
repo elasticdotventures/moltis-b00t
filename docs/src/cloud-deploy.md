@@ -28,12 +28,13 @@ Only keep Moltis TLS enabled when your proxy talks HTTPS to Moltis (or uses
 TCP TLS passthrough). In that case, set `MOLTIS_ALLOW_TLS_BEHIND_PROXY=true`.
 ```
 
-```admonish warning
-**Sandbox limitation**: Most cloud providers do not support Docker-in-Docker.
-The sandboxed command execution feature (where the LLM runs shell commands
-inside isolated containers) will not work on these platforms. The agent will
-still function for chat, tool calls that don't require shell execution, and
-MCP server connections.
+```admonish tip
+**Sandbox on cloud deploys**: Most cloud providers do not support
+Docker-in-Docker. To enable sandboxed command execution, configure a
+[remote sandbox backend](sandbox-remote.md) — set `VERCEL_TOKEN` for Vercel
+Firecracker microVMs, or `DAYTONA_API_KEY` for Daytona cloud sandboxes
+(including self-hosted). Moltis auto-detects these when no local Docker is
+available.
 ```
 
 ### `MOLTIS_DEPLOY_PLATFORM`
@@ -44,12 +45,85 @@ Set this to the name of your cloud provider (e.g. `flyio`, `digitalocean`,
 on cloud VMs. The included deploy templates for Fly.io, DigitalOcean, and
 Render already set this variable.
 
+## ngrok
+
+Moltis can also expose a public HTTPS endpoint through ngrok without running
+an external `ngrok` binary. This is useful when you want a public callback
+URL or temporary team access from a local machine or private host.
+
+For a side-by-side guide to Tailscale, NetBird, ngrok, and Cloudflare Tunnel,
+see [Remote Access](remote-access.md).
+
+Configuration:
+
+```toml
+[ngrok]
+enabled = true
+authtoken = "${NGROK_AUTHTOKEN}" # or set NGROK_AUTHTOKEN in the environment
+# domain = "team-gateway.ngrok.app" # optional reserved/static domain
+```
+
+Notes:
+
+- The tunnel is feature-gated. Standard CLI builds include it by default, but
+  custom minimal builds can opt out of the `ngrok` feature.
+- In the web UI, configure Tailscale, NetBird, ngrok, and Cloudflare Tunnel from Settings -> Remote Access.
+- ngrok forwards into a loopback-only internal HTTP listener. Your normal
+  local TLS and bind settings remain unchanged.
+- Keep authentication enabled. Exposing ngrok with `auth.disabled = true`
+  creates a public unauthenticated endpoint, which is exactly as bad as it
+  sounds.
+- Passkeys are hostname-bound. If you use ephemeral ngrok URLs, existing
+  passkeys may not work on the new hostname. Use a reserved domain if you want
+  stable passkey behavior.
+
+## Cloudflare Tunnel
+
+Moltis can start `cloudflared` and expose the gateway through a Cloudflare
+Tunnel. This is useful when your public DNS is already managed by Cloudflare or
+you want a stable HTTPS callback URL without opening inbound firewall ports.
+
+Configuration:
+
+```toml
+[cloudflare_tunnel]
+enabled = true
+token = "${CLOUDFLARE_TUNNEL_TOKEN}" # or set CLOUDFLARE_TUNNEL_TOKEN
+hostname = "moltis.example.com"      # optional but recommended for passkeys
+```
+
+Notes:
+
+- Install `cloudflared` on the host before enabling the connector.
+- Standard CLI builds include the feature by default; custom minimal builds can
+  opt out of `cloudflare-tunnel`.
+- Keep authentication enabled. A public tunnel with `auth.disabled = true`
+  exposes the setup-required page until authentication is configured.
+- Set `hostname` when you know the public route so Moltis can update WebAuthn
+  passkey origins consistently.
+
+## NetBird
+
+NetBird provides private mesh access similar to Tailscale Serve. Moltis detects
+the local NetBird peer address and displays the private URL from Settings ->
+Remote Access.
+
+Configuration:
+
+```toml
+[netbird]
+mode = "serve" # or "off"
+```
+
+NetBird does not provide a public Funnel equivalent. Use Cloudflare Tunnel,
+ngrok, or Tailscale Funnel when you need a public HTTPS endpoint.
+
 ## Coolify (self-hosted, e.g. Hetzner)
 
 Coolify deployments can run Moltis with sandboxed exec tools, as long as the
 service mounts the host Docker socket.
 
-- Use [`examples/docker-compose.coolify.yml`](../examples/docker-compose.coolify.yml)
+- Use [`examples/docker-compose.coolify.yml`](https://github.com/moltis-org/moltis/blob/main/examples/docker-compose.coolify.yml)
   as a starting point.
 - Run Moltis with `--no-tls` (Coolify terminates HTTPS at the proxy).
 - Set `MOLTIS_BEHIND_PROXY=true` so client IP/auth behavior is correct behind

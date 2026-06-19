@@ -77,13 +77,15 @@ offered = ["telegram"]
 | `group_allowlist` | no | `[]` | Group/chat IDs allowed to interact with the bot |
 | `model` | no | — | Override the default model for this channel |
 | `model_provider` | no | — | Provider for the overridden model |
+| `agent_id` | no | — | Default agent ID for this bot's sessions |
 | `reply_to_message` | no | `false` | Send bot responses as Telegram replies to the user's message |
 | `otp_self_approval` | no | `true` | Enable OTP self-approval for non-allowlisted DM users |
 | `otp_cooldown_secs` | no | `300` | Cooldown in seconds after 3 failed OTP attempts |
 | `stream_mode` | no | `"edit_in_place"` | Streaming mode: `"edit_in_place"` or `"off"` |
-| `edit_throttle_ms` | no | `300` | Minimum milliseconds between streaming edit updates |
-| `stream_notify_on_complete` | no | `false` | Send a completion notification after streaming finishes |
-| `stream_min_initial_chars` | no | `30` | Minimum characters before sending the first streamed message |
+| `edit_throttle_ms` | no | `2000` | Minimum milliseconds between streaming edit updates |
+| `stream_notify_on_complete` | no | `false` | Send the final answer as a notifying message instead of silently reusing the progress message |
+| `stream_min_initial_chars` | no | `30` | Minimum characters before sending the first temporary progress message |
+| `stream_progress_max_chars` | no | `3500` | Maximum recent progress characters kept visible in the temporary streamed message |
 
 ```admonish important title="Allowlist values are strings"
 All allowlist entries must be **strings**, even for numeric Telegram user IDs.
@@ -108,14 +110,15 @@ group_allowlist = ["-1001234567890"]
 reply_to_message = true
 model = "claude-sonnet-4-20250514"
 model_provider = "anthropic"
+agent_id = "research"
 otp_self_approval = true
 stream_mode = "edit_in_place"
-edit_throttle_ms = 300
+edit_throttle_ms = 2000
 ```
 
-### Per-User and Per-Channel Model Overrides
+### Per-User and Per-Channel Model and Agent Overrides
 
-You can override the model for specific users or group chats:
+You can override the model or agent for specific users or group chats:
 
 ```toml
 [channels.telegram.my-bot]
@@ -126,14 +129,16 @@ model_provider = "anthropic"
 [channels.telegram.my-bot.channel_overrides."-1001234567890"]
 model = "gpt-4o"
 model_provider = "openai"
+agent_id = "triage"
 
 [channels.telegram.my-bot.user_overrides."123456789"]
 model = "claude-opus-4-20250514"
 model_provider = "anthropic"
+agent_id = "research"
 ```
 
 User overrides take priority over channel overrides, which take priority over
-the account default.
+the account default, for both model selection and agent selection.
 
 ## Access Control
 
@@ -206,10 +211,39 @@ the web UI.
 
 ## Streaming
 
-By default (`stream_mode = "edit_in_place"`), the bot sends an initial message
-after `stream_min_initial_chars` characters (default: 30) and then edits it
-in place as tokens arrive, throttled to at most one edit every
-`edit_throttle_ms` milliseconds (default: 300).
+By default (`stream_mode = "edit_in_place"`), Telegram shows temporary progress
+while a turn is running. The bot sends a silent progress message after
+`stream_min_initial_chars` characters (default: 30), edits that progress message
+at most once every `edit_throttle_ms` milliseconds (default: 2000), and keeps only
+the latest `stream_progress_max_chars` progress characters visible.
+
+When the final answer is ready, the progress message is cleaned up or reused and
+the final answer is delivered separately from intermediate progress. With
+`stream_notify_on_complete = false` (default), Moltis may silently reuse the
+existing progress message for the final answer. With `stream_notify_on_complete =
+true`, Moltis deletes the progress message where possible and sends the final
+answer as a new notifying message.
+
+## Session Commands
+
+Telegram supports the standard channel session commands:
+
+| Command | Description |
+|---------|-------------|
+| `/new` | Start a fresh session for the current chat |
+| `/sessions` | List or switch among sessions already bound to the current chat |
+| `/attach` | List existing non-cron sessions and rebind one to the current chat |
+| `/agent` | List or switch chat agents |
+| `/mode` | List or switch temporary session modes |
+| `/model` | List or switch models |
+| `/approvals` | List pending exec approvals for the current session |
+| `/approve N` | Approve the numbered exec request from `/approvals` |
+| `/deny N` | Deny the numbered exec request from `/approvals` |
+
+`/sessions` is intentionally scoped to the current chat. If you want to bring a
+different existing session into the chat, use `/attach` instead. Reattaching a
+session moves that session's channel binding to the current chat, it is not a
+copy.
 
 Set `stream_mode = "off"` to disable streaming and send the full response as a
 single message.

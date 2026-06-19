@@ -3,7 +3,7 @@ use {
         Engine,
         engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     },
-    secrecy::Secret,
+    secrecy::{ExposeSecret, Secret},
     url::Url,
 };
 
@@ -33,7 +33,7 @@ impl OAuthFlow {
     pub fn new(config: OAuthConfig) -> Self {
         Self {
             config,
-            client: reqwest::Client::new(),
+            client: moltis_common::http_client::build_default_http_client(),
         }
     }
 
@@ -93,6 +93,12 @@ impl OAuthFlow {
         if let Some(resource) = &self.config.resource {
             form.push(("resource".to_string(), resource.clone()));
         }
+        if let Some(client_secret) = &self.config.client_secret {
+            form.push((
+                "client_secret".to_string(),
+                client_secret.expose_secret().clone(),
+            ));
+        }
 
         let result = self
             .client
@@ -130,6 +136,12 @@ impl OAuthFlow {
         ];
         if let Some(resource) = &self.config.resource {
             form.push(("resource".to_string(), resource.clone()));
+        }
+        if let Some(client_secret) = &self.config.client_secret {
+            form.push((
+                "client_secret".to_string(),
+                client_secret.expose_secret().clone(),
+            ));
         }
 
         let result = self

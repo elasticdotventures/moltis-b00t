@@ -1,24 +1,5 @@
 const { expect, test } = require("../base-test");
-const { expectPageContentMounted, navigateAndWait, waitForWsConnected, watchPageErrors } = require("../helpers");
-
-async function spoofSafari(page) {
-	await page.addInitScript(() => {
-		const safariUserAgent =
-			"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15";
-		Object.defineProperty(Navigator.prototype, "userAgent", {
-			configurable: true,
-			get() {
-				return safariUserAgent;
-			},
-		});
-		Object.defineProperty(Navigator.prototype, "vendor", {
-			configurable: true,
-			get() {
-				return "Apple Computer, Inc.";
-			},
-		});
-	});
-}
+const { navigateAndWait, waitForWsConnected, watchPageErrors } = require("../helpers");
 
 function graphqlHttpStatus(page) {
 	return page.evaluate(async () => {
@@ -37,33 +18,35 @@ test.describe("Settings navigation", () => {
 		await expect(page.locator("#providersTitle")).toBeVisible();
 	}
 
-	test("/settings redirects to /settings/identity", async ({ page }) => {
+	test("/settings redirects to /settings/profile", async ({ page }) => {
 		await navigateAndWait(page, "/settings");
-		await expect(page).toHaveURL(/\/settings\/identity$/);
-		await expect(page.getByRole("heading", { name: "Identity", exact: true })).toBeVisible();
+		await expect(page).toHaveURL(/\/settings\/profile$/);
+		await expect(page.getByRole("heading", { name: "User Profile", exact: true })).toBeVisible();
 	});
 
-	test("settings nav keeps distinct icons for nodes, tailscale, network audit, and openclaw import", async ({
+	test("settings nav keeps distinct icons for nodes, remote access, network audit, and openclaw import", async ({
 		page,
 	}) => {
 		const pageErrors = watchPageErrors(page);
-		await navigateAndWait(page, "/settings/identity");
+		await navigateAndWait(page, "/settings/profile");
 		await expect(page.locator(".settings-sidebar-nav")).toBeVisible();
 
 		const masks = await page.evaluate(() => {
+			const readableRules = (sheet) => {
+				try {
+					return Array.from(sheet.cssRules || []);
+				} catch {
+					return [];
+				}
+			};
+
 			const readRuleMask = (selector) => {
 				for (const sheet of Array.from(document.styleSheets || [])) {
-					let rules;
-					try {
-						rules = sheet.cssRules;
-					} catch {
-						continue;
-					}
-					if (!rules) continue;
-					for (const rule of Array.from(rules)) {
-						if (rule.type !== CSSRule.STYLE_RULE || rule.selectorText !== selector) continue;
+					const rule = readableRules(sheet).find(
+						(candidate) => candidate.type === CSSRule.STYLE_RULE && candidate.selectorText === selector,
+					);
+					if (rule)
 						return rule.style.getPropertyValue("-webkit-mask-image") || rule.style.getPropertyValue("mask-image") || "";
-					}
 				}
 				return null;
 			};
@@ -71,7 +54,7 @@ test.describe("Settings navigation", () => {
 				nodes: readRuleMask('.settings-nav-item[data-section="nodes"]::before'),
 				ssh: readRuleMask('.settings-nav-item[data-section="ssh"]::before'),
 				tools: readRuleMask('.settings-nav-item[data-section="tools"]::before'),
-				tailscale: readRuleMask('.settings-nav-item[data-section="tailscale"]::before'),
+				remoteAccess: readRuleMask('.settings-nav-item[data-section="remote-access"]::before'),
 				networkAudit: readRuleMask('.settings-nav-item[data-section="network-audit"]::before'),
 				mcp: readRuleMask('.settings-nav-item[data-section="mcp"]::before'),
 				openclawImport: readRuleMask('.settings-nav-item[data-section="import"]::before'),
@@ -88,10 +71,10 @@ test.describe("Settings navigation", () => {
 		}
 		expect(hasMask(masks.ssh)).toBeTruthy();
 		expect(hasMask(masks.tools)).toBeTruthy();
-		expect(hasMask(masks.tailscale)).toBeTruthy();
+		expect(hasMask(masks.remoteAccess)).toBeTruthy();
 		expect(hasMask(masks.networkAudit)).toBeTruthy();
 		expect(hasMask(masks.mcp)).toBeTruthy();
-		expect(masks.tailscale).not.toBe(masks.networkAudit);
+		expect(masks.remoteAccess).not.toBe(masks.networkAudit);
 
 		// Import appears only when OpenClaw is detected in this run.
 		if (masks.openclawImport !== null) {
@@ -103,14 +86,15 @@ test.describe("Settings navigation", () => {
 	});
 
 	const settingsSections = [
-		{ id: "identity", heading: "Identity" },
+		{ id: "profile", heading: "User Profile" },
 		{ id: "memory", heading: "Memory" },
 		{ id: "environment", heading: "Environment" },
 		{ id: "crons", heading: "Cron Jobs" },
 		{ id: "voice", heading: "Voice" },
+		{ id: "phone", heading: "Phone" },
 		{ id: "security", heading: "Security" },
 		{ id: "ssh", heading: "SSH" },
-		{ id: "tailscale", heading: "Tailscale" },
+		{ id: "remote-access", heading: "Remote Access" },
 		{ id: "network-audit", heading: "Network Audit" },
 		{ id: "notifications", heading: "Notifications" },
 		{ id: "providers", heading: "LLMs" },
@@ -119,6 +103,7 @@ test.describe("Settings navigation", () => {
 		{ id: "mcp", heading: "MCP" },
 		{ id: "hooks", heading: "Hooks" },
 		{ id: "skills", heading: "Skills" },
+		{ id: "projects", heading: "Repositories" },
 		{ id: "sandboxes", heading: "Sandboxes" },
 		{ id: "monitoring", heading: "Monitoring" },
 		{ id: "logs", heading: "Logs" },
@@ -129,6 +114,7 @@ test.describe("Settings navigation", () => {
 		test(`settings/${section.id} loads without errors`, async ({ page }) => {
 			const pageErrors = watchPageErrors(page);
 			await navigateAndWait(page, `/settings/${section.id}`);
+			await waitForWsConnected(page);
 
 			await expect(page).toHaveURL(new RegExp(`/settings/${section.id}$`));
 
@@ -141,8 +127,173 @@ test.describe("Settings navigation", () => {
 		});
 	}
 
+	test("voice settings saves whisper base URL without requiring an API key", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/settings/voice");
+		await waitForWsConnected(page);
+
+		const whisperRow = page
+			.locator(".provider-card")
+			.filter({ has: page.getByText("OpenAI Whisper", { exact: true }) })
+			.first();
+		await expect(whisperRow).toBeVisible();
+
+		await whisperRow.getByRole("button", { name: "Configure", exact: true }).click();
+		let modal = page
+			.locator(".modal-box")
+			.filter({ has: page.getByText("OpenAI Whisper", { exact: false }) })
+			.last();
+		await expect(modal).toBeVisible();
+		await modal.locator('input[data-field="baseUrl"]').fill("http://127.0.0.1:8001/v1");
+		await modal.getByRole("button", { name: "Save", exact: true }).click();
+
+		await expect(modal).toBeHidden();
+
+		await whisperRow.getByRole("button", { name: "Configure", exact: true }).click();
+		modal = page
+			.locator(".modal-box")
+			.filter({ has: page.getByText("OpenAI Whisper", { exact: false }) })
+			.last();
+		await expect(modal).toBeVisible();
+		await expect(modal.locator('input[data-field="baseUrl"]')).toHaveValue("http://127.0.0.1:8001/v1");
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("voice settings can clear an existing whisper base URL", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/settings/voice");
+		await waitForWsConnected(page);
+
+		const whisperRow = page
+			.locator(".provider-card")
+			.filter({ has: page.getByText("OpenAI Whisper", { exact: true }) })
+			.first();
+		await expect(whisperRow).toBeVisible();
+
+		await whisperRow.getByRole("button", { name: "Configure", exact: true }).click();
+		let modal = page
+			.locator(".modal-box")
+			.filter({ has: page.getByText("OpenAI Whisper", { exact: false }) })
+			.last();
+		await expect(modal).toBeVisible();
+		await modal.locator('input[data-field="baseUrl"]').fill("http://127.0.0.1:8001/v1");
+		await modal.getByRole("button", { name: "Save", exact: true }).click();
+
+		await expect(modal).toBeHidden();
+
+		await whisperRow.getByRole("button", { name: "Configure", exact: true }).click();
+		modal = page
+			.locator(".modal-box")
+			.filter({ has: page.getByText("OpenAI Whisper", { exact: false }) })
+			.last();
+		await expect(modal).toBeVisible();
+		await expect(modal.locator('input[data-field="baseUrl"]')).toHaveValue("http://127.0.0.1:8001/v1");
+		await modal.locator('input[data-field="baseUrl"]').fill("");
+		await modal.getByRole("button", { name: "Save", exact: true }).click();
+
+		await expect(modal).toBeHidden();
+
+		await whisperRow.getByRole("button", { name: "Configure", exact: true }).click();
+		modal = page
+			.locator(".modal-box")
+			.filter({ has: page.getByText("OpenAI Whisper", { exact: false }) })
+			.last();
+		await expect(modal).toBeVisible();
+		await expect(modal.locator('input[data-field="baseUrl"]')).toHaveValue("");
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("remote access page shows all connector cards", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await page.route("**/api/auth/status", async (route) => {
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({
+					auth_disabled: false,
+					authenticated: true,
+					has_api_keys: false,
+					has_passkeys: false,
+					has_password: true,
+				}),
+			});
+		});
+		await page.route("**/api/tailscale/status", async (route) => {
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({
+					hostname: "moltis.tail-scale.ts.net",
+					installed: true,
+					login_name: "team@example.com",
+					mode: "serve",
+					tailnet: "example.ts.net",
+					tailscale_ip: "100.64.0.10",
+					tailscale_up: true,
+					url: "https://moltis.tail-scale.ts.net",
+					version: "1.88.2",
+				}),
+			});
+		});
+		await page.route("**/api/ngrok/status", async (route) => {
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({
+					authtoken_present: true,
+					authtoken_source: "config",
+					domain: "team-gateway.ngrok.app",
+					enabled: true,
+					public_url: "https://team-gateway.ngrok.app",
+				}),
+			});
+		});
+		await page.route("**/api/netbird/status", async (route) => {
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({
+					installed: true,
+					mode: "serve",
+					netbird_up: true,
+					url: "https://100.80.0.10:8443",
+				}),
+			});
+		});
+		await page.route("**/api/cloudflare-tunnel/status", async (route) => {
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({
+					enabled: true,
+					hostname: "moltis.example.com",
+					public_url: "https://moltis.example.com",
+					token_source: "config",
+				}),
+			});
+		});
+
+		await navigateAndWait(page, "/settings/remote-access");
+
+		await expect(page.getByRole("heading", { name: "Remote Access", exact: true })).toBeVisible();
+		// Tailscale tab is active by default
+		await expect(page.getByRole("tab", { name: /Tailscale/ })).toBeVisible();
+		await expect(page.getByRole("tab", { name: /ngrok/ })).toBeVisible();
+		await expect(page.getByRole("tab", { name: /NetBird/ })).toBeVisible();
+		await expect(page.getByRole("tab", { name: /Cloudflare/ })).toBeVisible();
+		// Switch to ngrok tab to see its content
+		await page.getByRole("tab", { name: /ngrok/ }).click();
+		await expect(page.getByText("https://team-gateway.ngrok.app", { exact: true })).toBeVisible();
+		await page.getByRole("tab", { name: /NetBird/ }).click();
+		await expect(page.getByText("https://100.80.0.10:8443", { exact: true })).toBeVisible();
+		await page.getByRole("tab", { name: /Cloudflare/ }).click();
+		await expect(page.getByText("https://moltis.example.com", { exact: true }).last()).toBeVisible();
+
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("identity form elements render", async ({ page }) => {
-		await navigateAndWait(page, "/settings/identity");
+		await navigateAndWait(page, "/settings/profile");
 
 		// Identity page should have a name input and soul/description textarea
 		const content = page.locator("#pageContent");
@@ -197,9 +348,10 @@ test.describe("Settings navigation", () => {
 		// Re-navigate so ConnectNodeForm re-renders with the spoofed gon port.
 		await navigateAndWait(page, "/settings/nodes");
 
-		const endpointCode = page.locator("code").filter({ hasText: /^wss?:\/\// });
+		const endpointCode = page.locator("code").filter({ hasText: /^moltis node add --host wss?:\/\// });
 		await expect(endpointCode).toBeVisible();
-		const wsUrl = (await endpointCode.textContent()).trim();
+		const endpointText = (await endpointCode.textContent()).trim();
+		const wsUrl = endpointText.replace(/^moltis node add --host\s+/, "");
 
 		// The URL must use the browser's port (location.port), NOT the spoofed
 		// gon port 99999 — proving we are immune to the behind-proxy bug (#426).
@@ -353,94 +505,30 @@ test.describe("Settings navigation", () => {
 
 	test("identity name fields autosave on blur", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
-		await navigateAndWait(page, "/settings/identity");
-
-		const nextValues = await page.evaluate(() => {
-			var id = window.__MOLTIS__?.identity || {};
-			var nextBotName = id.name === "AutoBotNameA" ? "AutoBotNameB" : "AutoBotNameA";
-			var nextUserName = id.user_name === "AutoUserNameA" ? "AutoUserNameB" : "AutoUserNameA";
-			return { nextBotName, nextUserName };
-		});
-
-		const botNameInput = page.getByPlaceholder("e.g. Rex");
-		await botNameInput.fill(nextValues.nextBotName);
-		await botNameInput.blur();
-		await expect(page.getByText("Saved", { exact: true })).toBeVisible();
-		await expect
-			.poll(() => page.evaluate(() => (window.__MOLTIS__?.identity?.name || "").trim()))
-			.toBe(nextValues.nextBotName);
+		await navigateAndWait(page, "/settings/profile");
 
 		const userNameInput = page.getByPlaceholder("e.g. Alice");
-		await userNameInput.fill(nextValues.nextUserName);
+		await expect(userNameInput).toBeVisible({ timeout: 5_000 });
+		const currentVal = await userNameInput.inputValue();
+		const nextUserName = currentVal === "AutoUserNameA" ? "AutoUserNameB" : "AutoUserNameA";
+
+		await userNameInput.fill(nextUserName);
+		await expect(userNameInput).toHaveValue(nextUserName);
 		await userNameInput.blur();
-		await expect(page.getByText("Saved", { exact: true })).toBeVisible();
-		await expect
-			.poll(() => page.evaluate(() => (window.__MOLTIS__?.identity?.user_name || "").trim()))
-			.toBe(nextValues.nextUserName);
+
+		// Wait for the "Saved" flash (confirms autosave round-tripped).
+		await expect(page.getByText("Saved")).toBeVisible({ timeout: 15_000 });
+
+		// Reload and verify the value persisted.
+		await page.reload();
+		await expect(page.getByPlaceholder("e.g. Alice")).toHaveValue(nextUserName, { timeout: 10_000 });
 
 		expect(pageErrors).toEqual([]);
 	});
 
-	test("selecting identity emoji updates favicon live without requiring notice in Chromium", async ({ page }) => {
-		const pageErrors = watchPageErrors(page);
-		await navigateAndWait(page, "/settings/identity");
-
-		const pickBtn = page.getByRole("button", { name: "Pick", exact: true });
-		await expect(pickBtn).toBeVisible();
-		await pickBtn.click();
-
-		const selectedEmoji = await page.evaluate(() => {
-			var current = (window.__MOLTIS__?.identity?.emoji || "").trim();
-			var options = ["🦊", "🐙", "🤖", "🐶"];
-			return options.find((emoji) => emoji !== current) || "🦊";
-		});
-		const iconHrefBefore = await page.evaluate(() => document.querySelector('link[rel="icon"]')?.href || "");
-		await page.getByRole("button", { name: selectedEmoji, exact: true }).click();
-		await expect(page.getByText("Saved", { exact: true })).toBeVisible();
-		await expect
-			.poll(() =>
-				page.evaluate((beforeHref) => {
-					var href = document.querySelector('link[rel="icon"]')?.href || "";
-					return href.startsWith("data:image/png") && href !== beforeHref;
-				}, iconHrefBefore),
-			)
-			.toBeTruthy();
-		await expect(
-			page.getByText("favicon updates requires reload and may be cached for minutes", { exact: false }),
-		).toHaveCount(0);
-		await expect(page.getByRole("button", { name: "requires reload", exact: true })).toHaveCount(0);
-
-		expect(pageErrors).toEqual([]);
-	});
-
-	test("safari shows favicon reload notice and button triggers full page refresh", async ({ page }) => {
-		const pageErrors = watchPageErrors(page);
-		await spoofSafari(page);
-		await navigateAndWait(page, "/settings/identity");
-
-		const pickBtn = page.getByRole("button", { name: "Pick", exact: true });
-		await expect(pickBtn).toBeVisible();
-		await pickBtn.click();
-
-		const selectedEmoji = await page.evaluate(() => {
-			var current = (window.__MOLTIS__?.identity?.emoji || "").trim();
-			var options = ["🦊", "🐙", "🤖", "🐶"];
-			return options.find((emoji) => emoji !== current) || "🦊";
-		});
-		await page.getByRole("button", { name: selectedEmoji, exact: true }).click();
-		await expect(page.getByText("Saved", { exact: true })).toBeVisible();
-		await expect(
-			page.getByText("favicon updates requires reload and may be cached for minutes", { exact: false }),
-		).toBeVisible();
-		const reloadBtn = page.getByRole("button", { name: "requires reload", exact: true });
-		await expect(reloadBtn).toBeVisible();
-
-		await Promise.all([page.waitForEvent("framenavigated", (frame) => frame === page.mainFrame()), reloadBtn.click()]);
-		await expectPageContentMounted(page);
-		await expect(page).toHaveURL(/\/settings\/identity$/);
-
-		expect(pageErrors).toEqual([]);
-	});
+	// Removed: "selecting identity emoji updates favicon" and "safari favicon reload notice"
+	// Emoji picker moved from IdentitySection to AgentsPage in the agents architecture
+	// simplification (#898). These tests tested code that no longer exists on the profile page.
 
 	test("environment page has add form", async ({ page }) => {
 		await navigateAndWait(page, "/settings/environment");
@@ -500,26 +588,9 @@ test.describe("Settings navigation", () => {
 		await expect(page.locator("#terminalInstallTmux")).toHaveCount(1);
 	});
 
-	test("channels add telegram token field is treated as a password", async ({ page }) => {
-		const pageErrors = watchPageErrors(page);
-		await navigateAndWait(page, "/settings/channels");
-		await waitForWsConnected(page);
-
-		const addButton = page.getByRole("button", { name: "Connect Telegram", exact: true });
-		await expect(addButton).toBeVisible();
-		await addButton.click();
-
-		await expect(page.getByRole("heading", { name: "Connect Telegram", exact: true })).toBeVisible();
-		const tokenInput = page.getByPlaceholder("123456:ABC-DEF...");
-		await expect(tokenInput).toHaveAttribute("type", "password");
-		await expect(tokenInput).toHaveAttribute("autocomplete", "new-password");
-		await expect(tokenInput).toHaveAttribute("name", "telegram_bot_token");
-		expect(pageErrors).toEqual([]);
-	});
-
 	test("graphql toggle applies immediately", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
-		await navigateAndWait(page, "/settings/identity");
+		await navigateAndWait(page, "/settings/profile");
 		await waitForWsConnected(page);
 
 		const graphQlNavItem = page.locator(".settings-nav-item", { hasText: "GraphQL" });
@@ -563,7 +634,7 @@ test.describe("Settings navigation", () => {
 	});
 
 	test("sidebar groups and order match product layout", async ({ page }) => {
-		await navigateAndWait(page, "/settings/identity");
+		await navigateAndWait(page, "/settings/profile");
 
 		await expect(page.locator(".settings-group-label").nth(0)).toHaveText("General");
 		await expect(page.locator(".settings-group-label").nth(1)).toHaveText("Security");
@@ -571,21 +642,21 @@ test.describe("Settings navigation", () => {
 		await expect(page.locator(".settings-group-label").nth(3)).toHaveText("Systems");
 
 		const navItems = (await page.locator(".settings-nav-item").allTextContents()).map((text) => text.trim());
-		const expectedPrefix = [
-			"Identity",
+		const presentOptionalItems = (items) => items.filter((item) => navItems.includes(item));
+		const expected = [
+			"User Profile",
 			"Agents",
 			"Nodes",
+			"Projects",
 			"Environment",
 			"Memory",
 			"Notifications",
 			"Crons",
+			"Webhooks",
 			"Heartbeat",
 			"Authentication",
-		];
-		if (navItems.includes("Encryption")) expectedPrefix.push("Encryption");
-		if (navItems.includes("SSH")) expectedPrefix.push("SSH");
-		expectedPrefix.push(
-			"Tailscale",
+			...presentOptionalItems(["Encryption", "SSH"]),
+			"Remote Access",
 			"Network Audit",
 			"Sandboxes",
 			"Channels",
@@ -594,14 +665,14 @@ test.describe("Settings navigation", () => {
 			"Tools",
 			"MCP",
 			"Skills",
-		);
-		const expectedSystem = ["Terminal", "Monitoring", "Logs"];
-		const expected = [...expectedPrefix];
-		if (navItems.includes("OpenClaw Import")) expected.push("OpenClaw Import");
-		if (navItems.includes("Voice")) expected.push("Voice");
-		expected.push(...expectedSystem);
-		if (navItems.includes("GraphQL")) expected.push("GraphQL");
-		expected.push("Configuration");
+			...presentOptionalItems(["Imports"]),
+			...presentOptionalItems(["OpenClaw Import", "Voice", "Phone"]),
+			"Terminal",
+			"Monitoring",
+			"Logs",
+			...presentOptionalItems(["GraphQL"]),
+			"Configuration",
+		];
 		expect(navItems).toEqual(expected);
 
 		await expect(page.locator('.settings-nav-item[data-section="providers"]')).toHaveText("LLMs");

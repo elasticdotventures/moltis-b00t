@@ -1,8 +1,36 @@
 # Configuration
 
-Moltis is configured through `moltis.toml`, located in `~/.config/moltis/` by default.
+Moltis uses a **layered config model** with two files:
 
-On first run, a complete configuration file is generated with sensible defaults. You can edit it to customize behavior.
+| File | Owner | Purpose |
+|------|-------|---------|
+| `defaults.toml` | **Moltis** | Shipped defaults, regenerated on every startup |
+| `moltis.toml` | **You** | Your overrides only |
+
+On first run, both files are created in `~/.config/moltis/`. Your `moltis.toml`
+starts nearly empty — only the installation-specific port is set. All other
+settings inherit from `defaults.toml` automatically.
+
+## Merge Order
+
+Settings are resolved in this order (later wins):
+
+1. **Built-in defaults** — compiled into Moltis (`MoltisConfig::default()`)
+2. **`defaults.toml`** — Moltis-managed, refreshed on every startup
+3. **`moltis.toml`** — your overrides (additive deep merge)
+4. **`MOLTIS_*` environment variables** — highest precedence
+
+This means you only need to put values in `moltis.toml` that you intentionally
+want to differ from the shipped defaults. When Moltis upgrades and improves a
+default, your installation picks it up automatically — unless you've overridden
+that specific setting.
+
+```admonish tip title="Don't copy defaults into moltis.toml"
+Copying a built-in default into `moltis.toml` "freezes" it — future built-in
+improvements for that setting won't apply. The Settings UI shows **Built-in**,
+**Overridden**, and **Custom** badges so you can see which values are yours
+and which are inherited.
+```
 
 ## Configuration File Location
 
@@ -10,6 +38,34 @@ On first run, a complete configuration file is generated with sensible defaults.
 |----------|--------------|
 | macOS/Linux | `~/.config/moltis/moltis.toml` |
 | Custom | Set via `--config-dir` or `MOLTIS_CONFIG_DIR` |
+
+The `defaults.toml` file lives in the same directory. Do not edit it — your
+changes will be overwritten on the next startup.
+
+## Checking Config
+
+`moltis config check` validates your override file (`moltis.toml`) against the
+known config schema. It also checks that Moltis-managed `defaults.toml` exists
+and can be parsed, but it does not treat `defaults.toml` as user-authored input.
+
+New config fields should be added to the Rust config schema and its `Default`
+implementation. Moltis regenerates `defaults.toml` from those built-in defaults
+on startup, while `moltis.toml` should contain only values you intentionally
+override.
+
+## Agent-Readable Docs
+
+Moltis packages the documentation as local markdown files when the install
+format supports external share files, such as `.deb`, `.rpm`, Homebrew, and
+similar system packages. Agents are pointed at those local files through the
+system prompt so they can read setup, configuration, channel, and
+troubleshooting docs without needing web access.
+
+Resolution order is `MOLTIS_DOCS_DIR`, the packaged share docs directory
+(`<share>/docs`), the source checkout docs in development, then an embedded
+fallback copied to `~/.moltis/docs/moltis/`. Moltis also writes a generated
+`config-template.md` under `~/.moltis/docs/moltis/` for the current server port
+and points agents at it separately.
 
 ## Basic Settings
 
@@ -46,7 +102,7 @@ stream_transport = "sse"        # "sse", "websocket", or "auto"
 
 [providers.gemini]
 enabled = true
-models = ["gemini-2.5-flash-preview-05-20", "gemini-2.0-flash"]
+models = ["gemini-2.5-flash", "gemini-2.5-pro"]
 
 [providers.local-llm]
 enabled = true
@@ -168,6 +224,7 @@ Configure skill discovery and agent-managed personal skills:
 enabled = true
 auto_load = ["commit"]
 enable_agent_sidecar_files = false  # Opt-in: allow agents to write sidecar text files in personal skills
+enable_self_improvement = true     # System prompt guidance for autonomous skill creation/update
 ```
 
 `enable_agent_sidecar_files` is disabled by default. When enabled, Moltis
@@ -177,6 +234,12 @@ such as `script.sh`, `Dockerfile`, templates, or `_meta.json` inside
 directory, reject path traversal and symlink escapes, and are recorded in
 `~/.moltis/logs/security-audit.jsonl`.
 
+`enable_self_improvement` (default: true) injects system prompt guidance that
+encourages the agent to proactively create and update skills after complex
+tasks (5+ tool calls), tricky error fixes, or non-obvious workflows. The
+`patch_skill` tool allows surgical find/replace updates without rewriting the
+entire skill body.
+
 ## Chat Message Queue
 
 When a new message arrives while an agent run is already active, Moltis can either
@@ -185,10 +248,13 @@ replay queued messages one-by-one or merge them into a single follow-up message.
 ```toml
 [chat]
 message_queue_mode = "followup"  # Default: one-by-one replay
+prompt_memory_mode = "live-reload"
 
 # Options:
 #   "followup" - Queue each message and run them sequentially
 #   "collect"  - Merge queued text and run once after the active run
+#   "live-reload" - Re-read MEMORY.md before each turn
+#   "frozen-at-session-start" - Keep the first MEMORY.md snapshot for the session
 ```
 
 ## Memory System
@@ -197,13 +263,27 @@ Long-term memory uses embeddings for semantic search:
 
 ```toml
 [memory]
+style = "hybrid"              # Or "prompt-only", "search-only", "off"
+agent_write_mode = "hybrid"   # Or "prompt-only", "search-only", "off"
+user_profile_write_mode = "explicit-and-auto" # Or "explicit-only", "off"
 backend = "builtin"             # Or "qmd"
 provider = "openai"             # Or "local", "ollama", "custom"
 model = "text-embedding-3-small"
 citations = "auto"              # "on", "off", or "auto"
 llm_reranking = false
-session_export = false
+search_merge_strategy = "rrf"   # Or "linear"
+session_export = "on-new-or-reset" # Or "off"
 ```
+
+See [Memory Surfaces](memory-surfaces.md) for the boundary between
+`session_state`, prompt memory, searchable memory, and sandbox persistence.
+`memory.style` chooses the high-level behavior, while
+`chat.prompt_memory_mode` only affects prompt-visible `MEMORY.md`.
+`memory.agent_write_mode` controls where agent-authored writes are allowed to
+land. `memory.user_profile_write_mode` controls whether Moltis writes the
+managed `USER.md` surface, and whether browser/channel timezone or location
+signals may update it silently. `memory.session_export` controls whether
+session rollover exports are written at all.
 
 ## Authentication
 
@@ -261,6 +341,11 @@ env = { GITHUB_TOKEN = "ghp_..." }
 transport = "sse"
 url = "https://mcp.example.com/mcp?api_key=$REMOTE_MCP_KEY"
 headers = { Authorization = "Bearer ${REMOTE_MCP_TOKEN}" }
+
+[mcp.servers.remote_http]
+transport = "streamable-http"
+url = "https://mcp.example.com/mcp"
+headers = { Authorization = "Bearer ${API_KEY}" }
 ```
 
 Remote MCP URLs and headers support `$NAME` or `${NAME}` placeholders. For live remote servers, values resolve from Moltis-managed env overrides, either `[env]` in config or **Settings** → **Environment Variables**.
@@ -313,7 +398,11 @@ See [Slack](slack.md) for full configuration reference and setup instructions.
 enabled = true
 cert_path = "~/.config/moltis/cert.pem"
 key_path = "~/.config/moltis/key.pem"
-# If paths don't exist, a self-signed certificate is generated
+# If custom paths are not set and auto_generate is true, Moltis generates a
+# local CA and server certificate for localhost/private-network names. Public
+# VPS IP access should set public_ip; public domains should use a reverse proxy
+# or custom CA-issued certificates.
+# public_ip = "203.0.113.10"
 
 # Port for the plain-HTTP redirect / CA-download server.
 # Defaults to the server port + 1 when not set.

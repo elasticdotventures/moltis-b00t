@@ -1,38 +1,130 @@
 const { expect, test } = require("../base-test");
-const { navigateAndWait, openChatMoreModal, waitForWsConnected, watchPageErrors } = require("../helpers");
+const { navigateAndWait, sendRpcFromPage, waitForWsConnected, watchPageErrors } = require("../helpers");
 
-function isRetryableRpcError(message) {
-	if (typeof message !== "string") return false;
-	return message.includes("WebSocket not connected") || message.includes("WebSocket disconnected");
+function isNoProvidersConfiguredResponse(response) {
+	// `localizeRpcError` in helpers.js replaces `error.message` with a locale
+	// string (e.g. "An internal server error occurred.") and moves the original
+	// backend message to `serverMessage`. Check both so the test still skips
+	// when providers are unconfigured.
+	const err = response?.error;
+	const message = err?.serverMessage || err?.message || "";
+	return (
+		err?.code === "UNAVAILABLE" ||
+		message.includes("no LLM providers configured") ||
+		message.includes("chat not configured")
+	);
 }
 
-async function sendRpcFromPage(page, method, params) {
-	let lastResponse = null;
-	for (let attempt = 0; attempt < 30; attempt++) {
-		if (attempt > 0) {
-			await waitForWsConnected(page);
-		}
-		lastResponse = await page
-			.evaluate(
-				async ({ methodName, methodParams }) => {
-					var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
-					if (!appScript) throw new Error("app module script not found");
-					var appUrl = new URL(appScript.src, window.location.origin);
-					var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
-					var helpers = await import(`${prefix}js/helpers.js`);
-					return helpers.sendRpc(methodName, methodParams);
-				},
-				{
-					methodName: method,
-					methodParams: params,
-				},
-			)
-			.catch((error) => ({ ok: false, error: { message: error?.message || String(error) } }));
+async function waitForWsConnectedIfPossible(page) {
+	await waitForWsConnected(page, 5_000).catch(() => "ignored");
+}
 
-		if (lastResponse?.ok) return lastResponse;
-		if (!isRetryableRpcError(lastResponse?.error?.message)) return lastResponse;
-	}
-	return lastResponse;
+async function setMockModels(page, models, selectedId) {
+	await page.evaluate(
+		async ([models, selectedId]) => {
+			var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app module script not found");
+			var appUrl = new URL(appScript.src, window.location.origin);
+			var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+			var store = await import(`${prefix}js/stores/model-store.js`);
+
+			store.select(selectedId);
+			store.setAll(models);
+		},
+		[models, selectedId],
+	);
+}
+
+async function mockFullContextRpc(page) {
+	await page.evaluate(async () => {
+		var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+		if (!appScript) throw new Error("app module script not found");
+		var appUrl = new URL(appScript.src, window.location.origin);
+		var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+		var stateModule = await import(`${prefix}js/state.js`);
+		var ws = stateModule.ws;
+		if (!ws) throw new Error("websocket unavailable");
+
+		if (!window.__origFullContextWsSend) {
+			window.__origFullContextWsSend = ws.send.bind(ws);
+		}
+		window.__mockPromptMemoryRefreshCount = 0;
+		window.__mockPromptMemoryVersion = 1;
+
+		function mockPromptMemory() {
+			return {
+				mode: "frozen-at-session-start",
+				snapshotActive: true,
+				present: true,
+				chars: window.__mockPromptMemoryVersion === 1 ? 12 : 24,
+				path: window.__mockPromptMemoryVersion === 1 ? "/tmp/MEMORY-v1.md" : "/tmp/MEMORY-v2.md",
+				fileSource: "root_workspace",
+			};
+		}
+
+		function resolvePending(id, payload) {
+			var resolver = stateModule.pending?.[id];
+			if (typeof resolver !== "function") return false;
+			delete stateModule.pending[id];
+			resolver({ ok: true, payload });
+			return true;
+		}
+
+		function handleMockPromptMemoryRpc(parsed) {
+			if (parsed?.method === "chat.context") {
+				return resolvePending(parsed.id, {
+					session: { key: "main", messageCount: 2, model: "demo-model" },
+					supportsTools: true,
+					promptMemory: mockPromptMemory(),
+				});
+			}
+			if (parsed?.method === "chat.full_context") {
+				return resolvePending(parsed.id, {
+					messageCount: 2,
+					systemPromptChars: 42,
+					totalChars: 128,
+					promptMemory: mockPromptMemory(),
+					messages: [
+						{ role: "user", content: "How are you?" },
+						{
+							role: "assistant",
+							content: "Doing fine.",
+							tool_calls: [{ function: { name: "demo_tool", arguments: '{"hello":"world"}' } }],
+						},
+					],
+					llmOutputs: [{ text: "assistant raw output" }],
+				});
+			}
+			if (parsed?.method === "chat.prompt_memory.refresh") {
+				window.__mockPromptMemoryRefreshCount += 1;
+				window.__mockPromptMemoryVersion = 2;
+				return resolvePending(parsed.id, {
+					ok: true,
+					sessionKey: "main",
+					agentId: "main",
+					snapshotCleared: true,
+					promptMemory: mockPromptMemory(),
+				});
+			}
+			return false;
+		}
+
+		ws.send = (payload) => {
+			try {
+				var parsed = JSON.parse(payload);
+				if (handleMockPromptMemoryRpc(parsed)) {
+					return;
+				}
+			} catch (_err) {
+				// Fall through to the original sender.
+			}
+			return window.__origFullContextWsSend(payload);
+		};
+	});
+}
+
+async function getMockPromptMemoryRefreshCount(page) {
+	return await page.evaluate(() => window.__mockPromptMemoryRefreshCount || 0);
 }
 
 async function waitForChatInputReady(page) {
@@ -64,50 +156,99 @@ async function getChatSeq(page) {
 	});
 }
 
+async function mockChatSendSync(page) {
+	await page.evaluate(async () => {
+		var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+		if (!appScript) throw new Error("app module script not found");
+		var appUrl = new URL(appScript.src, window.location.origin);
+		var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+		var stateModule = await import(`${prefix}js/state.js`);
+		var ws = stateModule.ws;
+		if (!ws) throw new Error("websocket unavailable");
+
+		if (!window.__origBtwWsSend) {
+			window.__origBtwWsSend = ws.send.bind(ws);
+		}
+		window.__btwPayloads = [];
+
+		ws.send = (payload) => {
+			try {
+				var parsed = JSON.parse(payload);
+				if (parsed?.method === "chat.send_sync") {
+					window.__btwPayloads.push(parsed.params || {});
+					var resolver = stateModule.pending?.[parsed.id];
+					if (typeof resolver === "function") {
+						delete stateModule.pending[parsed.id];
+						resolver({ ok: true, payload: { text: "btw answer" } });
+					}
+					return;
+				}
+			} catch (_err) {
+				// Fall through to original sender.
+			}
+			return window.__origBtwWsSend(payload);
+		};
+	});
+}
+
+async function getBtwPayloads(page) {
+	return await page.evaluate(() => window.__btwPayloads || []);
+}
+
+async function closeFullContextIfOpen(page, modal) {
+	if (!(await modal.isVisible().catch(() => false))) return;
+	await page.locator("#fullContextModalCloseBtn").click();
+	await expect(modal).toBeHidden({ timeout: 8_000 });
+}
+
+async function fullContextPanelState(copyBtn, copiedBtn, downloadBtn, llmOutputBtn, failedMsg) {
+	if ((await copyBtn.isVisible().catch(() => false)) || (await copiedBtn.isVisible().catch(() => false))) {
+		return "controls";
+	}
+	if ((await downloadBtn.isVisible().catch(() => false)) && (await llmOutputBtn.isVisible().catch(() => false))) {
+		return "controls";
+	}
+	if (await failedMsg.isVisible().catch(() => false)) return "failed";
+	return "loading";
+}
+
 async function openFullContextWithRetry(page) {
-	const chatMoreModal = page.locator("#chatMoreModal");
 	const fullContextModal = page.locator("#fullContextModal");
 	const toggleBtn = page.locator("#fullContextBtn");
 	const panel = page.locator("#fullContextPanel");
 	const copyBtn = panel.getByRole("button", { name: "Copy", exact: true });
+	const copiedBtn = panel.getByRole("button", { name: "Copied!", exact: true });
+	const downloadBtn = panel.getByRole("button", { name: "Download", exact: true });
+	const llmOutputBtn = panel.getByRole("button", { name: "LLM output", exact: true });
 	const failedMsg = panel.getByText("Failed to build context", { exact: true });
 
 	for (let attempt = 0; attempt < 5; attempt++) {
-		await waitForWsConnected(page);
-		const fullContextRpc = await sendRpcFromPage(page, "chat.full_context", {});
-		const noProvidersConfigured =
-			fullContextRpc?.error?.code === "UNAVAILABLE" ||
-			fullContextRpc?.error?.message?.includes("no LLM providers configured") ||
-			fullContextRpc?.error?.message?.includes("chat not configured");
+		await waitForWsConnectedIfPossible(page);
+		await closeFullContextIfOpen(page, fullContextModal);
 
-		if (await fullContextModal.isVisible().catch(() => false)) {
-			await page.locator("#fullContextModalCloseBtn").click();
-			await expect(fullContextModal).toBeHidden({ timeout: 8_000 });
-		}
-
-		await openChatMoreModal(page);
 		await expect(toggleBtn).toBeVisible({ timeout: 8_000 });
 		await toggleBtn.click();
-		await expect(chatMoreModal).toBeHidden({ timeout: 8_000 });
 		await expect(fullContextModal).toBeVisible({ timeout: 8_000 });
 		await expect(panel).toBeVisible();
 
 		const result = await expect
-			.poll(
-				async () => {
-					if (await copyBtn.isVisible().catch(() => false)) return "copy";
-					if (await failedMsg.isVisible().catch(() => false)) return "failed";
-					return "loading";
-				},
-				{ timeout: 8_000 },
-			)
-			.toBe("copy")
-			.then(() => "copy")
+			.poll(async () => await fullContextPanelState(copyBtn, copiedBtn, downloadBtn, llmOutputBtn, failedMsg), {
+				timeout: 12_000,
+			})
+			.toBe("controls")
+			.then(() => "controls")
 			.catch(() => "failed");
 
-		if (result === "copy") return copyBtn;
-		if (result === "failed" && noProvidersConfigured) {
-			return null;
+		if (result === "controls") {
+			if (await copyBtn.isVisible().catch(() => false)) return copyBtn;
+			if (await copiedBtn.isVisible().catch(() => false)) return copiedBtn;
+			return copyBtn;
+		}
+		if (result === "failed") {
+			const fullContextRpc = await sendRpcFromPage(page, "chat.full_context", {});
+			if (isNoProvidersConfiguredResponse(fullContextRpc)) {
+				return null;
+			}
 		}
 	}
 
@@ -150,6 +291,69 @@ test.describe("Chat input and slash commands", () => {
 		await expect(chatInput).toBeFocused();
 	});
 
+	test("chat.full_context reports workspace prompt truncation", async ({ page }) => {
+		const originalResponse = await sendRpcFromPage(page, "agents.files.get", {
+			agent_id: "main",
+			path: "AGENTS.md",
+		});
+		const originalContent = originalResponse?.ok ? originalResponse.payload?.content || "" : "";
+		const oversizedContent = `${"A".repeat(32_050)}\n`;
+
+		try {
+			const setResponse = await sendRpcFromPage(page, "agents.files.set", {
+				agent_id: "main",
+				path: "AGENTS.md",
+				content: oversizedContent,
+			});
+			expect(setResponse?.ok).toBe(true);
+
+			const fullContextRpc = await sendRpcFromPage(page, "chat.full_context", {});
+			if (isNoProvidersConfiguredResponse(fullContextRpc)) {
+				return;
+			}
+			expect(fullContextRpc?.ok).toBe(true);
+			expect(fullContextRpc.payload?.truncated).toBe(true);
+			expect(Array.isArray(fullContextRpc.payload?.workspaceFiles)).toBe(true);
+			const agentsFile = fullContextRpc.payload.workspaceFiles.find((file) => file?.name === "AGENTS.md");
+			expect(agentsFile?.truncated).toBe(true);
+			expect(Number(agentsFile?.original_chars || 0)).toBeGreaterThan(32_000);
+
+			const triggerBtn = await openFullContextWithRetry(page);
+			if (triggerBtn) {
+				const panel = page.locator("#fullContextPanel");
+				await expect(panel).toContainText("AGENTS.md", { timeout: 10_000 });
+				await expect(panel).toContainText("truncated by", { timeout: 10_000 });
+			}
+		} finally {
+			await sendRpcFromPage(page, "agents.files.set", {
+				agent_id: "main",
+				path: "AGENTS.md",
+				content: originalContent,
+			});
+		}
+	});
+
+	test("full context modal shows prompt memory status and can refresh frozen snapshots", async ({ page }) => {
+		await mockFullContextRpc(page);
+
+		const triggerBtn = await openFullContextWithRetry(page);
+		expect(triggerBtn).not.toBe(false);
+		if (triggerBtn === null) {
+			return;
+		}
+
+		const panel = page.locator("#fullContextPanel");
+		await expect(panel).toContainText("Prompt memory: Frozen at session start", { timeout: 10_000 });
+		await expect(panel).toContainText("/tmp/MEMORY-v1.md", { timeout: 10_000 });
+
+		const refreshBtn = panel.getByRole("button", { name: "Refresh memory", exact: true });
+		await expect(refreshBtn).toBeVisible();
+		await refreshBtn.click();
+
+		await expect.poll(async () => await getMockPromptMemoryRefreshCount(page), { timeout: 10_000 }).toBe(1);
+		await expect(panel).toContainText("/tmp/MEMORY-v2.md", { timeout: 10_000 });
+	});
+
 	test('typing "/" shows slash command menu', async ({ page }) => {
 		const chatInput = page.locator("#chatInput");
 		await chatInput.focus();
@@ -166,6 +370,7 @@ test.describe("Chat input and slash commands", () => {
 			})
 			.toBeGreaterThan(0);
 		await expect(slashMenu).toContainText("/sh");
+		await expect(slashMenu).toContainText("/mode");
 	});
 
 	test("slash menu filters as user types", async ({ page }) => {
@@ -225,9 +430,122 @@ test.describe("Chat input and slash commands", () => {
 		}
 	});
 
+	test("mobile model selector dropdown is not clipped", async ({ page }) => {
+		await page.setViewportSize({ width: 390, height: 844 });
+		await page.waitForFunction(() => window.innerWidth === 390, { timeout: 5_000 });
+
+		const modelBtn = page.locator("#modelComboBtn");
+		await expect(modelBtn).toBeVisible();
+		await modelBtn.click();
+
+		const dropdown = page.locator("#modelDropdown");
+		await expect(dropdown).toBeVisible();
+		const box = await dropdown.boundingBox();
+		expect(box?.height || 0).toBeGreaterThan(40);
+		expect(box?.width || 0).toBeLessThanOrEqual(390);
+	});
+
+	test("model selector exposes long gateway model names", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		const modelId = "requesty/anthropic/claude-sonnet-4-20250514-thinking-extended-beta";
+		const displayName = "Claude Sonnet 4 20250514 Thinking Extended Beta";
+		const fullTitle = `${displayName} (${modelId})`;
+
+		await setMockModels(page, [{ id: modelId, displayName, provider: "requesty", supportsReasoning: false }], modelId);
+
+		await page.locator("#modelComboBtn").click();
+		const dropdown = page.locator("#modelDropdown");
+		await expect(dropdown).toBeVisible();
+
+		const box = await dropdown.boundingBox();
+		expect(box?.width || 0).toBeGreaterThan(360);
+
+		const item = page.locator("#modelDropdownList .model-dropdown-item").first();
+		await expect(item).toHaveAttribute("title", fullTitle);
+		await expect(item.locator(".model-item-label")).toHaveAttribute("title", fullTitle);
+		await item.click();
+		await expect(page.locator("#modelComboLabel")).toHaveAttribute("title", fullTitle);
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("send button is present", async ({ page }) => {
 		const sendBtn = page.locator("#sendBtn");
 		await expect(sendBtn).toBeVisible();
+	});
+
+	test("send button resets when chat send rejects", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await page.evaluate(async () => {
+			var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app module script not found");
+			var appUrl = new URL(appScript.src, window.location.origin);
+			var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+			var stateModule = await import(`${prefix}js/state.js`);
+			var ws = stateModule.ws;
+			if (!ws) throw new Error("websocket unavailable");
+
+			var originalSend = ws.send.bind(ws);
+			ws.send = (payload) => {
+				var parsed = JSON.parse(payload);
+				if (parsed?.method === "chat.send") {
+					ws.send = originalSend;
+					throw new Error("simulated chat.send transport failure");
+				}
+				return originalSend(payload);
+			};
+		});
+
+		const chatInput = page.locator("#chatInput");
+		const sendBtn = page.locator("#sendBtn");
+		await chatInput.fill("hello");
+		await chatInput.press("Enter");
+
+		await expect(page.locator("#messages")).toContainText("Request failed");
+		await expect(sendBtn).toHaveAttribute("data-mode", "send");
+		await expect(sendBtn).toHaveAttribute("aria-label", "Send");
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("chat composer is centered with footer controls", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		const composer = page.locator("#chatComposer");
+		const queuedMessages = page.locator("#queuedMessages");
+		await expect(composer).toBeVisible();
+		await expect(queuedMessages).toHaveClass(/\bhidden\b/);
+		await expect(page.locator("#modelCombo")).toBeVisible();
+		await expect(page.locator("#attachBtn")).toBeVisible();
+		await expect(page.locator("#micBtn")).toBeAttached();
+
+		const layout = await page.evaluate(() => {
+			var composerEl = document.getElementById("chatComposer");
+			var tokenBarEl = document.getElementById("tokenBar");
+			var rowEl = document.querySelector(".chat-input-row");
+			var footerEl = document.querySelector(".chat-composer-footer");
+			if (!(composerEl && tokenBarEl && rowEl && footerEl)) throw new Error("composer elements missing");
+			var composerRect = composerEl.getBoundingClientRect();
+			var rowRect = rowEl.getBoundingClientRect();
+			var styles = window.getComputedStyle(composerEl);
+			var rowStyles = window.getComputedStyle(rowEl);
+			return {
+				composerWidth: composerRect.width,
+				rowWidth: rowRect.width,
+				leftGap: composerRect.left - rowRect.left,
+				rightGap: rowRect.right - composerRect.right,
+				borderRadius: Number.parseFloat(styles.borderTopLeftRadius),
+				footerDirection: window.getComputedStyle(footerEl).display,
+				rowBackground: rowStyles.backgroundColor,
+				pageBackground: window.getComputedStyle(document.body).backgroundColor,
+				tokenParentClass: tokenBarEl.parentElement?.className || "",
+			};
+		});
+
+		expect(layout.composerWidth).toBeLessThan(layout.rowWidth);
+		expect(Math.abs(layout.leftGap - layout.rightGap)).toBeLessThanOrEqual(2);
+		expect(layout.borderRadius).toBeGreaterThanOrEqual(18);
+		expect(layout.footerDirection).toBe("flex");
+		expect(layout.rowBackground).toBe(layout.pageBackground);
+		expect(layout.tokenParentClass).toContain("chat-composer-footer");
+		expect(pageErrors).toEqual([]);
 	});
 
 	test("/sh toggles command mode UI", async ({ page }) => {
@@ -246,6 +564,52 @@ test.describe("Chat input and slash commands", () => {
 		await expect(prompt).toBeHidden();
 		await expect(chatInput).toHaveAttribute("placeholder", "Type a message...");
 		await expect(tokenBar).not.toContainText("/sh mode");
+	});
+
+	test("/mode switches the active session mode", async ({ page }) => {
+		const chatInput = page.locator("#chatInput");
+		try {
+			await chatInput.fill("/mode concise");
+			await chatInput.press("Enter");
+			await expect(page.locator("#messages")).toContainText("Mode:", { timeout: 10_000 });
+			await expect
+				.poll(
+					async () => {
+						const response = await sendRpcFromPage(page, "sessions.list", {});
+						const payload = response?.payload;
+						const sessions = Array.isArray(payload)
+							? payload
+							: Array.isArray(payload?.sessions)
+								? payload.sessions
+								: [];
+						const main = sessions.find((session) => session?.key === "main");
+						return main?.mode_id || main?.modeId || "";
+					},
+					{ timeout: 10_000 },
+				)
+				.toBe("concise");
+		} finally {
+			await sendRpcFromPage(page, "modes.set_session", { session_key: "main", mode_id: null });
+		}
+	});
+
+	test("/btw sends an ephemeral no-tools side question", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await mockChatSendSync(page);
+
+		const chatInput = page.locator("#chatInput");
+		await chatInput.fill("/btw what changed?");
+		await chatInput.press("Enter");
+
+		await expect(page.locator("#messages")).toContainText("btw answer");
+		const payloads = await getBtwPayloads(page);
+		expect(payloads).toHaveLength(1);
+		expect(payloads[0]).toMatchObject({
+			text: "what changed?",
+			_ephemeral: true,
+			_tool_policy: { deny: ["*"] },
+		});
+		expect(pageErrors).toEqual([]);
 	});
 
 	test("command mode prefixes outgoing user message with /sh", async ({ page }) => {
@@ -284,7 +648,138 @@ test.describe("Chat input and slash commands", () => {
 			.toBe("/sh echo hello");
 	});
 
+	test("attaches arbitrary files with metadata", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await page.route("**/api/sessions/main/upload", async (route) => {
+			const request = route.request();
+			const body = request.postDataBuffer() || Buffer.alloc(0);
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({
+					ok: true,
+					url: "/api/sessions/main/media/calendar.ics",
+					filename: "calendar.ics",
+					contentType: request.headers()["content-type"] || "text/calendar",
+					size: body.length,
+				}),
+			});
+		});
+		await page.evaluate(() => {
+			window.__fileAttachmentPayloads = [];
+			if (window.__fileAttachmentWsSpyInstalled) return;
+			var originalSend = WebSocket.prototype.send;
+			WebSocket.prototype.send = function (data) {
+				try {
+					var parsed = JSON.parse(data);
+					if (parsed?.method === "chat.send") {
+						window.__fileAttachmentPayloads.push(parsed.params || {});
+					}
+				} catch {
+					// ignore non-JSON payloads
+				}
+				return originalSend.call(this, data);
+			};
+			window.__fileAttachmentWsSpyInstalled = true;
+		});
+
+		await page.locator("#attachInput").setInputFiles({
+			name: "calendar.ics",
+			mimeType: "text/calendar",
+			buffer: Buffer.from("BEGIN:VCALENDAR\nEND:VCALENDAR\n"),
+		});
+		await expect(page.locator(".media-preview-item")).toContainText("calendar.ics");
+		await expect(page.locator(".media-preview-item")).toContainText("30 B");
+
+		await page.locator("#chatInput").fill("please inspect this");
+		await page.locator("#chatInput").press("Enter");
+		await expect(page.locator(".document-container")).toContainText("calendar.ics");
+
+		await expect
+			.poll(
+				async () =>
+					await page.evaluate(() => {
+						var payloads = window.__fileAttachmentPayloads || [];
+						var last = payloads[payloads.length - 1];
+						return last?._document_files?.[0] || null;
+					}),
+				{ timeout: 5_000 },
+			)
+			.toMatchObject({
+				display_name: "calendar.ics",
+				stored_filename: "calendar.ics",
+				mime_type: "text/calendar",
+				size_bytes: 30,
+			});
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("preserves typed text when attachment upload fails", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await page.route("**/api/sessions/main/upload", async (route) => {
+			await route.fulfill({
+				status: 500,
+				contentType: "application/json",
+				body: JSON.stringify({ ok: false, error: "upload failed" }),
+			});
+		});
+
+		await page.locator("#attachInput").setInputFiles({
+			name: "broken.ics",
+			mimeType: "text/calendar",
+			buffer: Buffer.from("BEGIN:VCALENDAR\nEND:VCALENDAR\n"),
+		});
+		await page.locator("#chatInput").fill("do not lose this");
+		await page.locator("#chatInput").press("Enter");
+
+		await expect(page.locator(".msg.error")).toContainText("File upload failed");
+		await expect(page.locator("#chatInput")).toHaveValue("do not lose this");
+		await expect(page.locator(".media-preview-item")).toContainText("broken.ics");
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("token bar stays visible at zero usage", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+
+		async function forceZeroUsageTokenBar() {
+			return await page.evaluate(async () => {
+				var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+				if (!appScript) throw new Error("app module script not found");
+				var appUrl = new URL(appScript.src, window.location.origin);
+				var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+				var state = await import(`${prefix}js/state.js`);
+				var chatUi = await import(`${prefix}js/chat-ui.js`);
+				state.setSessionTokens({ input: 0, output: 0 });
+				state.setSessionCurrentInputTokens(0);
+				state.setSessionCurrentContextTokens(0);
+				state.setSessionContextWindow(0);
+				state.setSessionToolsEnabled(true);
+				state.setSessionExecMode("host");
+				state.setSessionExecPromptSymbol("$");
+				state.setCommandModeEnabled(false);
+				chatUi.updateTokenBar();
+				var bar = document.querySelector("#tokenBar");
+				if (!bar) return { visible: false, text: "", hasExec: false, hasCommandMode: false };
+				var text = bar.textContent || "";
+				return {
+					visible: window.getComputedStyle(bar).display !== "none",
+					text,
+					hasExec: text.includes("Execute:"),
+					hasCommandMode: text.includes("/sh mode"),
+				};
+			});
+		}
+
+		await expect.poll(forceZeroUsageTokenBar, { timeout: 10_000 }).toEqual({
+			visible: true,
+			text: "0",
+			hasExec: false,
+			hasCommandMode: false,
+		});
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("token bar hides empty context usage", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 
 		await page.evaluate(async () => {
@@ -295,44 +790,61 @@ test.describe("Chat input and slash commands", () => {
 			var state = await import(`${prefix}js/state.js`);
 			var chatUi = await import(`${prefix}js/chat-ui.js`);
 			state.setSessionTokens({ input: 0, output: 0 });
-			state.setSessionContextWindow(0);
+			state.setSessionCurrentInputTokens(0);
+			state.setSessionCurrentContextTokens(0);
+			state.setSessionContextWindow(200000);
 			state.setSessionToolsEnabled(true);
-			state.setSessionExecMode("host");
-			state.setSessionExecPromptSymbol("$");
 			state.setCommandModeEnabled(false);
 			chatUi.updateTokenBar();
 		});
 
-		const tokenBar = page.locator("#tokenBar");
-		await expect(tokenBar).toBeVisible();
-		await expect(tokenBar).toContainText("0 in / 0 out · 0 tokens");
-		await expect(tokenBar).toContainText("Execute:");
-		await expect(tokenBar).not.toContainText("/sh mode");
+		await expect(page.locator("#tokenBar")).toBeHidden();
 		expect(pageErrors).toEqual([]);
 	});
 
-	test("token bar context-left uses current request input, not cumulative totals", async ({ page }) => {
-		const pageErrors = watchPageErrors(page);
-
-		const tokenBarText = await page.evaluate(async () => {
+	test("assistant token usage formatter shows cached input counts when present", async ({ page }) => {
+		const formatted = await page.evaluate(async () => {
 			var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
 			if (!appScript) throw new Error("app module script not found");
 			var appUrl = new URL(appScript.src, window.location.origin);
 			var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
-			var state = await import(`${prefix}js/state.js`);
-			var chatUi = await import(`${prefix}js/chat-ui.js`);
-			state.setSessionTokens({ input: 200000, output: 0 });
-			state.setSessionCurrentInputTokens(50000);
-			state.setSessionContextWindow(200000);
-			state.setSessionToolsEnabled(true);
-			chatUi.updateTokenBar();
-			var tokenBar = document.getElementById("tokenBar");
-			return tokenBar ? tokenBar.textContent || "" : "";
+			var helpers = await import(`${prefix}js/helpers.js`);
+			return {
+				cached: helpers.formatAssistantTokenUsage(12400, 320, 11800),
+				uncached: helpers.formatAssistantTokenUsage(900, 45, 0),
+			};
 		});
 
-		const tokenBar = page.locator("#tokenBar");
-		await expect(tokenBar).toBeVisible();
-		expect(tokenBarText).toContain("Context left before auto-compact: 75%");
+		expect(formatted).toEqual({
+			cached: "12.4K in (11.8K cached) / 320 out",
+			uncached: "900 in / 45 out",
+		});
+	});
+
+	test("token bar shows current context tokens and context used", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+
+		await expect
+			.poll(async () => {
+				return await page.evaluate(async () => {
+					var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+					if (!appScript) throw new Error("app module script not found");
+					var appUrl = new URL(appScript.src, window.location.origin);
+					var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+					var state = await import(`${prefix}js/state.js`);
+					var chatUi = await import(`${prefix}js/chat-ui.js`);
+					state.setSessionTokens({ input: 200000, output: 0 });
+					state.setSessionCurrentInputTokens(50000);
+					state.setSessionCurrentContextTokens(62000);
+					state.setSessionContextWindow(200000);
+					state.setSessionToolsEnabled(true);
+					chatUi.updateTokenBar();
+					var tokenBar = document.getElementById("tokenBar");
+					return tokenBar && tokenBar.offsetParent !== null ? tokenBar.textContent || "" : "";
+				});
+			})
+			.toBe("62.0K (31%)");
+
 		expect(pageErrors).toEqual([]);
 	});
 
@@ -363,6 +875,7 @@ test.describe("Chat input and slash commands", () => {
 
 	test("full context copy button uses small button style", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
+		await mockFullContextRpc(page);
 		const copyBtn = await openFullContextWithRetry(page);
 		if (copyBtn === null) {
 			await expect(
@@ -426,6 +939,7 @@ test.describe("Chat input and slash commands", () => {
 
 	test("full context download button produces .jsonl file", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
+		await mockFullContextRpc(page);
 		const copyBtn = await openFullContextWithRetry(page);
 		if (copyBtn === null) {
 			await expect(
@@ -462,9 +976,25 @@ test.describe("Chat input and slash commands", () => {
 	test("/clear resets client chat sequence", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 		await setChatSeq(page, 8);
+		async function forceContextTokenBar() {
+			return await page.evaluate(async () => {
+				var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+				if (!appScript) throw new Error("app module script not found");
+				var appUrl = new URL(appScript.src, window.location.origin);
+				var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+				var state = await import(`${prefix}js/state.js`);
+				var chatUi = await import(`${prefix}js/chat-ui.js`);
+				state.setSessionCurrentContextTokens(62000);
+				state.setSessionContextWindow(200000);
+				chatUi.updateTokenBar();
+				return document.querySelector("#tokenBar")?.textContent || "";
+			});
+		}
+		await expect.poll(forceContextTokenBar, { timeout: 10_000 }).toContain("62.0K (31%)");
 
 		const reset = await runClearSlashCommandWithRetry(page);
 		expect(reset).toBeTruthy();
+		await expect(page.locator("#tokenBar")).toBeHidden();
 		expect(pageErrors).toEqual([]);
 	});
 });

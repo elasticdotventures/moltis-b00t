@@ -27,18 +27,24 @@ static malloc_conf: &[u8] = b"dirty_decay_ms:1000,muzzy_decay_ms:1000,background
 mod auth_commands;
 mod browser_commands;
 mod channel_commands;
+#[cfg(feature = "cloudflare-tunnel")]
+mod cloudflare_tunnel_commands;
 mod config_commands;
+mod data_commands;
 mod db_commands;
 mod doctor_commands;
 mod hooks_commands;
 #[cfg(feature = "openclaw-import")]
 mod import_commands;
 mod memory_commands;
+#[cfg(feature = "netbird")]
+mod netbird_commands;
 mod node_commands;
 mod sandbox_commands;
 mod service_commands;
 #[cfg(feature = "tailscale")]
 mod tailscale_commands;
+mod voicecall_commands;
 
 use {
     anyhow::anyhow,
@@ -49,7 +55,11 @@ use {
 };
 
 #[derive(Parser)]
-#[command(name = "moltis", about = "Moltis — personal AI gateway", version)]
+#[command(
+    name = "moltis",
+    about = "Moltis — personal AI gateway",
+    version = moltis_config::VERSION
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -156,6 +166,11 @@ enum Commands {
         #[command(subcommand)]
         action: browser_commands::BrowserAction,
     },
+    /// Export and import Moltis data archives.
+    Data {
+        #[command(subcommand)]
+        action: data_commands::DataAction,
+    },
     /// Database management (reset, clear, migrate).
     Db {
         #[command(subcommand)]
@@ -187,6 +202,23 @@ enum Commands {
     Tailscale {
         #[command(subcommand)]
         action: tailscale_commands::TailscaleAction,
+    },
+    /// NetBird private mesh access management.
+    #[cfg(feature = "netbird")]
+    Netbird {
+        #[command(subcommand)]
+        action: netbird_commands::NetbirdAction,
+    },
+    /// Cloudflare Tunnel management.
+    #[cfg(feature = "cloudflare-tunnel")]
+    CloudflareTunnel {
+        #[command(subcommand)]
+        action: cloudflare_tunnel_commands::CloudflareTunnelAction,
+    },
+    /// Voice call management (initiate, status, end).
+    VoiceCall {
+        #[command(subcommand)]
+        action: voicecall_commands::VoiceCallAction,
     },
     /// Install the Moltis CA certificate into the system trust store.
     #[cfg(feature = "tls")]
@@ -234,22 +266,26 @@ enum SkillAction {
     },
 }
 
+fn default_telemetry_filter(log_level: &str) -> EnvFilter {
+    let mut filter = EnvFilter::new(log_level);
+    for directive in [
+        "chromiumoxide=off",
+        "matrix_sdk=warn",
+        "matrix_sdk_base=warn",
+        "matrix_sdk_crypto=error",
+    ] {
+        if let Ok(directive) = directive.parse() {
+            filter = filter.add_directive(directive);
+        }
+    }
+    filter
+}
+
 /// Initialise tracing and optionally attach a [`LogBroadcastLayer`] that
 /// captures events into an in-memory ring buffer for the web UI.
 fn init_telemetry(cli: &Cli, log_buffer: Option<LogBuffer>) {
-    // Start with user-specified or default log level
-    let base_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
-
-    // Suppress noisy chromiumoxide logs:
-    // - "WS Invalid message" warnings (Chrome sends CDP events the library doesn't recognize)
-    // - "WS Connection error" errors (normal when idle connections are closed)
-    // These are expected browser sandbox behavior, not actionable errors.
-    let filter = if let Ok(directive) = "chromiumoxide=off".parse() {
-        base_filter.add_directive(directive)
-    } else {
-        base_filter
-    };
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| default_telemetry_filter(&cli.log_level));
 
     if let Some(ref buffer) = log_buffer {
         let levels = EnabledLogLevels::from_max_level_hint(filter.max_level_hint());
@@ -402,6 +438,10 @@ async fn main() -> anyhow::Result<()> {
         )
     });
 
+    // Initialize config directory once for all subcommands
+    // (write defaults.toml, compact, persist random port).
+    moltis_config::initialize_config();
+
     match cli.command {
         // Default: start gateway when no subcommand is provided
         None | Some(Commands::Gateway) => {
@@ -442,6 +482,7 @@ async fn main() -> anyhow::Result<()> {
                 extra_routes,
             )
             .await
+            .map_err(Into::into)
         },
         Some(Commands::Agent { message, .. }) => {
             let result = moltis_agents::runner::run_agent("default", "main", &message).await?;
@@ -456,6 +497,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Auth { action }) => auth_commands::handle_auth(action).await,
         Some(Commands::Sandbox { action }) => sandbox_commands::handle_sandbox(action).await,
         Some(Commands::Browser { action }) => browser_commands::handle_browser(action),
+        Some(Commands::Data { action }) => data_commands::handle_data(action).await,
         Some(Commands::Db { action }) => db_commands::handle_db(action).await,
         Some(Commands::Memory { action }) => memory_commands::handle_memory(action).await,
         Some(Commands::Node { action }) => node_commands::handle_node(action).await,
@@ -464,10 +506,17 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Import { action }) => import_commands::handle_import(action).await,
         #[cfg(feature = "tailscale")]
         Some(Commands::Tailscale { action }) => tailscale_commands::handle_tailscale(action).await,
+        #[cfg(feature = "netbird")]
+        Some(Commands::Netbird { action }) => netbird_commands::handle_netbird(action).await,
+        #[cfg(feature = "cloudflare-tunnel")]
+        Some(Commands::CloudflareTunnel { action }) => {
+            cloudflare_tunnel_commands::handle_cloudflare_tunnel(action).await
+        },
         Some(Commands::Skills { action }) => handle_skills(action).await,
         Some(Commands::Config { action }) => config_commands::handle_config(action).await,
         Some(Commands::Doctor) => doctor_commands::handle_doctor().await,
         Some(Commands::Hooks { action }) => hooks_commands::handle_hooks(action).await,
+        Some(Commands::VoiceCall { action }) => voicecall_commands::handle_voicecall(action).await,
         #[cfg(feature = "tls")]
         Some(Commands::TrustCa) => trust_ca().await,
         Some(_) => {
@@ -563,4 +612,19 @@ async fn handle_skills(action: SkillAction) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::default_telemetry_filter;
+
+    #[test]
+    fn default_telemetry_filter_quiets_noisy_targets() {
+        let filter = default_telemetry_filter("info").to_string();
+        assert!(filter.contains("info"));
+        assert!(filter.contains("chromiumoxide=off"));
+        assert!(filter.contains("matrix_sdk=warn"));
+        assert!(filter.contains("matrix_sdk_base=warn"));
+        assert!(filter.contains("matrix_sdk_crypto=error"));
+    }
 }

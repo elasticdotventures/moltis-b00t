@@ -1,12 +1,17 @@
-use std::pin::Pin;
+use std::{
+    collections::{HashMap, HashSet},
+    pin::Pin,
+    sync::mpsc,
+    time::Duration,
+};
 
 use {async_trait::async_trait, futures::StreamExt, secrecy::ExposeSecret, tokio_stream::Stream};
 
 use tracing::{debug, trace, warn};
 
 use moltis_agents::model::{
-    ChatMessage, CompletionResponse, ContentPart, LlmProvider, StreamEvent, ToolCall, Usage,
-    UserContent,
+    AgentToolControls, ChatMessage, CompletionResponse, ContentPart, LlmProvider, StreamEvent,
+    ToolCall, ToolChoice, Usage, UserContent,
 };
 
 pub struct AnthropicProvider {
@@ -20,7 +25,14 @@ pub struct AnthropicProvider {
     reasoning_effort: Option<moltis_agents::model::ReasoningEffort>,
     /// Prompt cache retention policy. When `None`, caching is disabled.
     cache_retention: moltis_config::CacheRetention,
+    /// Global per-model context window overrides from `[models.<id>]` config.
+    context_window_global: HashMap<String, u32>,
+    /// Provider-scoped per-model context window overrides from
+    /// `[providers.<name>.model_overrides.<id>]` config.
+    context_window_provider: HashMap<String, u32>,
 }
+
+const ANTHROPIC_MODELS_ENDPOINT_PATH: &str = "/v1/models";
 
 impl AnthropicProvider {
     pub fn new(api_key: secrecy::Secret<String>, model: String, base_url: String) -> Self {
@@ -32,6 +44,8 @@ impl AnthropicProvider {
             alias: None,
             reasoning_effort: None,
             cache_retention: moltis_config::CacheRetention::Short,
+            context_window_global: HashMap::new(),
+            context_window_provider: HashMap::new(),
         }
     }
 
@@ -50,6 +64,8 @@ impl AnthropicProvider {
             alias,
             reasoning_effort: None,
             cache_retention: moltis_config::CacheRetention::Short,
+            context_window_global: HashMap::new(),
+            context_window_provider: HashMap::new(),
         }
     }
 
@@ -64,6 +80,21 @@ impl AnthropicProvider {
         !matches!(self.cache_retention, moltis_config::CacheRetention::None)
     }
 
+    /// Set context window override maps extracted from config.
+    ///
+    /// `global` comes from `[models.<id>].context_window` and
+    /// `provider` comes from `[providers.<name>.model_overrides.<id>].context_window`.
+    #[must_use]
+    pub fn with_context_window_overrides(
+        mut self,
+        global: HashMap<String, u32>,
+        provider: HashMap<String, u32>,
+    ) -> Self {
+        self.context_window_global = global;
+        self.context_window_provider = provider;
+        self
+    }
+
     /// Apply `thinking` configuration to an Anthropic request body based on
     /// the configured reasoning effort.
     fn apply_thinking(&self, body: &mut serde_json::Value) {
@@ -72,9 +103,11 @@ impl AnthropicProvider {
             return;
         };
         let budget_tokens: u64 = match effort {
+            ReasoningEffort::Minimal => 1024,
             ReasoningEffort::Low => 4096,
             ReasoningEffort::Medium => 10240,
             ReasoningEffort::High => 32768,
+            ReasoningEffort::ExtraHigh => 65536,
         };
         body["thinking"] = serde_json::json!({
             "type": "enabled",
@@ -87,6 +120,308 @@ impl AnthropicProvider {
             body["max_tokens"] = serde_json::json!(budget_tokens + 4096);
         }
     }
+
+    async fn probe_request(&self) -> anyhow::Result<()> {
+        let (system_value, anthropic_messages) =
+            to_anthropic_messages(&[ChatMessage::user("ping")], false);
+
+        let mut body = serde_json::json!({
+            "model": self.model,
+            // Probe for reachability, not full extended-thinking behavior.
+            "max_tokens": 1,
+            "messages": anthropic_messages,
+        });
+
+        if let Some(ref sys) = system_value {
+            body["system"] = sys.clone();
+        }
+
+        debug!(model = %self.model, "anthropic probe request");
+        trace!(body = %serde_json::to_string(&body).unwrap_or_default(), "anthropic probe request body");
+
+        let http_resp = self
+            .client
+            .post(format!("{}/v1/messages", self.base_url))
+            .header("x-api-key", self.api_key.expose_secret())
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = http_resp.status();
+        if !status.is_success() {
+            let retry_after_ms = retry_after_ms_from_headers(http_resp.headers());
+            let body_text = http_resp.text().await.unwrap_or_default();
+            warn!(status = %status, body = %body_text, "anthropic probe API error");
+            anyhow::bail!(
+                "{}",
+                with_retry_after_marker(
+                    format!("Anthropic API error HTTP {status}: {body_text}"),
+                    retry_after_ms
+                )
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Lightweight availability check via Anthropic's `GET /v1/models` endpoint.
+    ///
+    /// Verifies the API key is valid and the model exists without generating
+    /// any tokens. Falls back to [`probe_request()`] if the models endpoint
+    /// is unavailable.
+    async fn check_model_in_catalog(&self) -> anyhow::Result<()> {
+        let url = format!(
+            "{}{ANTHROPIC_MODELS_ENDPOINT_PATH}/{}",
+            self.base_url.trim_end_matches('/'),
+            self.model,
+        );
+
+        debug!(
+            model = %self.model,
+            url = %url,
+            "checking anthropic model availability via catalog"
+        );
+
+        let resp = self
+            .client
+            .get(&url)
+            .timeout(Duration::from_secs(15))
+            .header("x-api-key", self.api_key.expose_secret())
+            .header("anthropic-version", "2023-06-01")
+            .header("accept", "application/json")
+            .send()
+            .await;
+
+        let resp = match resp {
+            Ok(r) => r,
+            Err(err) => {
+                debug!(
+                    error = %err,
+                    "anthropic catalog unreachable, falling back to completion probe"
+                );
+                return self.probe_request().await;
+            },
+        };
+
+        if resp.status().is_success() {
+            debug!(model = %self.model, "model found in anthropic catalog");
+            return Ok(());
+        }
+
+        // 404 means the model ID doesn't exist — return an error directly
+        // instead of wasting tokens on a completion probe.
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            let mut body_text = resp.text().await.unwrap_or_default();
+            body_text.truncate(200);
+            anyhow::bail!(
+                "Model '{}' not found in Anthropic catalog (HTTP 404: {})",
+                self.model,
+                body_text,
+            );
+        }
+
+        // Other errors (auth, rate-limit) — fall back to the completion probe
+        // which has richer error classification.
+        debug!(
+            status = %resp.status(),
+            "anthropic catalog check failed, falling back to completion probe"
+        );
+        self.probe_request().await
+    }
+}
+
+fn formatted_model_name(model_id: &str) -> String {
+    let raw = model_id.strip_prefix("claude-").unwrap_or(model_id);
+    let mut pieces = Vec::new();
+    let chunks: Vec<&str> = raw.split('-').filter(|chunk| !chunk.is_empty()).collect();
+    let mut index = 0usize;
+    while index < chunks.len() {
+        let chunk = chunks[index];
+        let piece = if chunk.chars().all(|ch| ch.is_ascii_digit()) && chunk.len() == 1 {
+            if let Some(next) = chunks.get(index + 1)
+                && next.chars().all(|ch| ch.is_ascii_digit())
+                && next.len() == 1
+            {
+                index += 1;
+                format!("{chunk}.{next}")
+            } else {
+                chunk.to_string()
+            }
+        } else if chunk.chars().all(|ch| ch.is_ascii_digit()) && chunk.len() == 8 {
+            let year = &chunk[0..4];
+            let month = &chunk[4..6];
+            let day = &chunk[6..8];
+            format!("{year}-{month}-{day}")
+        } else {
+            let mut chars = chunk.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut out = String::new();
+                    out.push(first.to_ascii_uppercase());
+                    out.push_str(chars.as_str());
+                    out
+                },
+                None => continue,
+            }
+        };
+        pieces.push(piece);
+        index += 1;
+    }
+
+    if pieces.is_empty() {
+        return model_id.to_string();
+    }
+
+    format!("Claude {}", pieces.join(" "))
+}
+
+fn normalize_display_name(model_id: &str, display_name: Option<&str>) -> String {
+    let normalized = display_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(model_id);
+    if normalized == model_id {
+        return formatted_model_name(model_id);
+    }
+    normalized.to_string()
+}
+
+fn parse_model_entry(entry: &serde_json::Value) -> Option<crate::DiscoveredModel> {
+    let obj = entry.as_object()?;
+    let model_id = obj.get("id").and_then(serde_json::Value::as_str)?;
+
+    if !super::is_chat_capable_model(model_id) {
+        return None;
+    }
+
+    let display_name = obj.get("display_name").and_then(serde_json::Value::as_str);
+
+    Some(crate::DiscoveredModel::new(
+        model_id,
+        normalize_display_name(model_id, display_name),
+    ))
+}
+
+fn parse_models_payload(value: &serde_json::Value) -> Vec<crate::DiscoveredModel> {
+    let entries = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .or_else(|| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in entries {
+        if let Some(model) = parse_model_entry(&entry)
+            && seen.insert(model.id.clone())
+        {
+            models.push(model);
+        }
+    }
+
+    models
+}
+
+fn mark_recommended_models(models: &mut [crate::DiscoveredModel]) {
+    for model in models.iter_mut().take(3) {
+        model.recommended = true;
+    }
+}
+
+fn models_endpoint(base_url: &str) -> String {
+    format!(
+        "{}{ANTHROPIC_MODELS_ENDPOINT_PATH}",
+        base_url.trim_end_matches('/')
+    )
+}
+
+pub async fn fetch_models_from_api(
+    api_key: secrecy::Secret<String>,
+    base_url: String,
+) -> anyhow::Result<Vec<crate::DiscoveredModel>> {
+    let client = crate::shared_http_client();
+    let mut models = Vec::new();
+    let mut seen_ids = HashSet::new();
+    let mut seen_after_ids = HashSet::new();
+    let mut after_id: Option<String> = None;
+
+    loop {
+        let mut request = client
+            .get(models_endpoint(&base_url))
+            .timeout(Duration::from_secs(15))
+            .header("x-api-key", api_key.expose_secret())
+            .header("anthropic-version", "2023-06-01")
+            .header("accept", "application/json");
+
+        if let Some(ref after) = after_id {
+            request = request.query(&[("after_id", after)]);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("anthropic models API error HTTP {status}: {body}");
+        }
+
+        let payload: serde_json::Value = serde_json::from_str(&body)?;
+        for model in parse_models_payload(&payload) {
+            if seen_ids.insert(model.id.clone()) {
+                models.push(model);
+            }
+        }
+
+        let has_more = payload
+            .get("has_more")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let next_after_id = payload
+            .get("last_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(ToOwned::to_owned);
+
+        if !has_more {
+            break;
+        }
+
+        let Some(next_after_id) = next_after_id else {
+            break;
+        };
+
+        if !seen_after_ids.insert(next_after_id.clone()) {
+            break;
+        }
+        after_id = Some(next_after_id);
+    }
+
+    mark_recommended_models(&mut models);
+
+    if models.is_empty() {
+        anyhow::bail!("anthropic models API returned no models");
+    }
+
+    Ok(models)
+}
+
+pub fn start_model_discovery(
+    api_key: secrecy::Secret<String>,
+    base_url: String,
+) -> mpsc::Receiver<anyhow::Result<Vec<crate::DiscoveredModel>>> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(anyhow::Error::from)
+            .and_then(|rt| rt.block_on(fetch_models_from_api(api_key, base_url)));
+        let _ = tx.send(result);
+    });
+    rx
 }
 
 /// Convert tool schemas from the generic format to Anthropic's tool format.
@@ -103,6 +438,40 @@ fn to_anthropic_tools(tools: &[serde_json::Value]) -> Vec<serde_json::Value> {
         .collect()
 }
 
+fn apply_anthropic_tool_choice(
+    body: &mut serde_json::Value,
+    options: &AgentToolControls,
+) -> anyhow::Result<()> {
+    match options.tool_choice.as_ref() {
+        None => {},
+        Some(ToolChoice::Auto) => {
+            if body.get("tools").is_some() {
+                body["tool_choice"] = serde_json::json!({ "type": "auto" });
+            }
+        },
+        Some(ToolChoice::Any) => {
+            if body.get("tools").is_some() {
+                body["tool_choice"] = serde_json::json!({ "type": "any" });
+            }
+        },
+        Some(ToolChoice::None) => {
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("tools");
+            }
+        },
+        Some(ToolChoice::Tool { name }) => {
+            if name.trim().is_empty() {
+                anyhow::bail!("forced Anthropic tool_choice requires a tool name");
+            }
+            if body.get("tools").is_none() {
+                anyhow::bail!("forced Anthropic tool_choice requires at least one active tool");
+            }
+            body["tool_choice"] = serde_json::json!({ "type": "tool", "name": name });
+        },
+    }
+    Ok(())
+}
+
 /// Parse tool_use blocks from an Anthropic response.
 fn parse_tool_calls(content: &[serde_json::Value]) -> Vec<ToolCall> {
     content
@@ -113,6 +482,8 @@ fn parse_tool_calls(content: &[serde_json::Value]) -> Vec<ToolCall> {
                     id: block["id"].as_str().unwrap_or("").to_string(),
                     name: block["name"].as_str().unwrap_or("").to_string(),
                     arguments: block["input"].clone(),
+                    argument_diagnostic: None,
+                    metadata: None,
                 })
             } else {
                 None
@@ -154,35 +525,60 @@ fn to_anthropic_messages(
                     None => content.clone(),
                 });
             },
-            ChatMessage::User { content } => match content {
-                UserContent::Text(text) => {
-                    out.push(serde_json::json!({"role": "user", "content": text}));
-                },
-                UserContent::Multimodal(parts) => {
-                    let blocks: Vec<serde_json::Value> = parts
-                        .iter()
-                        .map(|part| match part {
-                            ContentPart::Text(text) => {
-                                serde_json::json!({"type": "text", "text": text})
-                            },
-                            ContentPart::Image { media_type, data } => {
-                                serde_json::json!({
-                                    "type": "image",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": media_type,
-                                        "data": data,
-                                    }
-                                })
-                            },
-                        })
-                        .collect();
-                    out.push(serde_json::json!({"role": "user", "content": blocks}));
-                },
+            ChatMessage::User { content, name } => {
+                // Anthropic doesn't have a `name` field — prepend `[name]: ` to content.
+                let prefix = name
+                    .as_ref()
+                    .map(|n| format!("[{n}]: "))
+                    .unwrap_or_default();
+                match content {
+                    UserContent::Text(text) => {
+                        let content_str = format!("{prefix}{text}");
+                        out.push(serde_json::json!({"role": "user", "content": content_str}));
+                    },
+                    UserContent::Multimodal(parts) => {
+                        let mut prefixed_first_text = false;
+                        let mut blocks: Vec<serde_json::Value> = parts
+                            .iter()
+                            .map(|part| match part {
+                                ContentPart::Text(text) => {
+                                    let content = if !prefix.is_empty() && !prefixed_first_text {
+                                        prefixed_first_text = true;
+                                        format!("{prefix}{text}")
+                                    } else {
+                                        text.clone()
+                                    };
+                                    serde_json::json!({"type": "text", "text": content})
+                                },
+                                ContentPart::Image { media_type, data } => {
+                                    serde_json::json!({
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": media_type,
+                                            "data": data,
+                                        }
+                                    })
+                                },
+                            })
+                            .collect();
+                        // If name prefix is present but no text block exists, prepend one.
+                        if !prefix.is_empty()
+                            && !blocks.iter().any(|b| b["type"].as_str() == Some("text"))
+                        {
+                            blocks.insert(
+                                0,
+                                serde_json::json!({"type": "text", "text": prefix.trim_end()}),
+                            );
+                        }
+                        out.push(serde_json::json!({"role": "user", "content": blocks}));
+                    },
+                }
             },
             ChatMessage::Assistant {
                 content,
                 tool_calls,
+                ..
             } => {
                 if tool_calls.is_empty() {
                     out.push(serde_json::json!({
@@ -300,6 +696,8 @@ impl LlmProvider for AnthropicProvider {
             alias: self.alias.clone(),
             reasoning_effort: Some(effort),
             cache_retention: self.cache_retention,
+            context_window_global: self.context_window_global.clone(),
+            context_window_provider: self.context_window_provider.clone(),
         }))
     }
 
@@ -312,7 +710,11 @@ impl LlmProvider for AnthropicProvider {
     }
 
     fn context_window(&self) -> u32 {
-        super::context_window_for_model(&self.model)
+        crate::context_window_for_model_with_config(
+            &self.model,
+            &self.context_window_global,
+            &self.context_window_provider,
+        )
     }
 
     fn supports_vision(&self) -> bool {
@@ -323,6 +725,16 @@ impl LlmProvider for AnthropicProvider {
         &self,
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
+    ) -> anyhow::Result<CompletionResponse> {
+        self.complete_with_options(messages, tools, &AgentToolControls::default())
+            .await
+    }
+
+    async fn complete_with_options(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+        options: &AgentToolControls,
     ) -> anyhow::Result<CompletionResponse> {
         let caching = self.caching_enabled();
         let (system_value, anthropic_messages) = to_anthropic_messages(messages, caching);
@@ -340,6 +752,17 @@ impl LlmProvider for AnthropicProvider {
         if !tools.is_empty() {
             body["tools"] = serde_json::Value::Array(to_anthropic_tools(tools));
         }
+
+        if self.reasoning_effort.is_some()
+            && matches!(
+                options.tool_choice,
+                Some(ToolChoice::Tool { .. } | ToolChoice::Any)
+            )
+        {
+            anyhow::bail!("Anthropic forced tool_choice is not compatible with extended thinking");
+        }
+
+        apply_anthropic_tool_choice(&mut body, options)?;
 
         self.apply_thinking(&mut body);
 
@@ -432,11 +855,28 @@ impl LlmProvider for AnthropicProvider {
         self.stream_with_tools(messages, vec![])
     }
 
+    async fn probe(&self) -> anyhow::Result<()> {
+        self.probe_request().await
+    }
+
+    async fn check_availability(&self) -> anyhow::Result<()> {
+        self.check_model_in_catalog().await
+    }
+
     #[allow(clippy::collapsible_if)]
     fn stream_with_tools(
         &self,
         messages: Vec<ChatMessage>,
         tools: Vec<serde_json::Value>,
+    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+        self.stream_with_tools_and_options(messages, tools, AgentToolControls::default())
+    }
+
+    fn stream_with_tools_and_options(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<serde_json::Value>,
+        options: AgentToolControls,
     ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
         Box::pin(async_stream::stream! {
             let caching = self.caching_enabled();
@@ -455,6 +895,20 @@ impl LlmProvider for AnthropicProvider {
 
             if !tools.is_empty() {
                 body["tools"] = serde_json::Value::Array(to_anthropic_tools(&tools));
+            }
+
+            if self.reasoning_effort.is_some()
+                && matches!(options.tool_choice, Some(ToolChoice::Tool { .. } | ToolChoice::Any))
+            {
+                yield StreamEvent::Error(
+                    "Anthropic forced tool_choice is not compatible with extended thinking".to_string(),
+                );
+                return;
+            }
+
+            if let Err(error) = apply_anthropic_tool_choice(&mut body, &options) {
+                yield StreamEvent::Error(error.to_string());
+                return;
             }
 
             self.apply_thinking(&mut body);
@@ -524,8 +978,9 @@ impl LlmProvider for AnthropicProvider {
                     buf = buf[pos + 2..].to_string();
 
                     for line in block.lines() {
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            if let Ok(evt) = serde_json::from_str::<serde_json::Value>(data) {
+                        if let Some(data) = line.strip_prefix("data: ")
+                            && let Ok(evt) = serde_json::from_str::<serde_json::Value>(data)
+                        {
                                 let evt_type = evt["type"].as_str().unwrap_or("");
                                 match evt_type {
                                     "content_block_start" => {
@@ -537,7 +992,7 @@ impl LlmProvider for AnthropicProvider {
                                             let id = content_block["id"].as_str().unwrap_or("").to_string();
                                             let name = content_block["name"].as_str().unwrap_or("").to_string();
                                             current_block_index = Some(index);
-                                            yield StreamEvent::ToolCallStart { id, name, index };
+                                            yield StreamEvent::ToolCallStart { id, name, index, metadata: None };
                                         }
                                     }
                                     "content_block_delta" => {
@@ -545,19 +1000,19 @@ impl LlmProvider for AnthropicProvider {
                                         let delta_type = delta["type"].as_str().unwrap_or("");
 
                                         if delta_type == "text_delta" {
-                                            if let Some(text) = delta["text"].as_str() {
-                                                if !text.is_empty() {
-                                                    yield StreamEvent::Delta(text.to_string());
-                                                }
+                                            if let Some(text) = delta["text"].as_str()
+                                                && !text.is_empty()
+                                            {
+                                                yield StreamEvent::Delta(text.to_string());
                                             }
-                                        } else if delta_type == "input_json_delta" {
-                                            if let Some(partial_json) = delta["partial_json"].as_str() {
-                                                let index = evt["index"].as_u64().unwrap_or(0) as usize;
-                                                yield StreamEvent::ToolCallArgumentsDelta {
-                                                    index,
-                                                    delta: partial_json.to_string(),
-                                                };
-                                            }
+                                        } else if delta_type == "input_json_delta"
+                                            && let Some(partial_json) = delta["partial_json"].as_str()
+                                        {
+                                            let index = evt["index"].as_u64().unwrap_or(0) as usize;
+                                            yield StreamEvent::ToolCallArgumentsDelta {
+                                                index,
+                                                delta: partial_json.to_string(),
+                                            };
                                         }
                                     }
                                     "content_block_stop" => {
@@ -611,7 +1066,6 @@ impl LlmProvider for AnthropicProvider {
                                     }
                                     _ => {}
                                 }
-                            }
                         }
                     }
                 }
@@ -622,272 +1076,4 @@ impl LlmProvider for AnthropicProvider {
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn retry_after_ms_from_headers_parses_seconds() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::RETRY_AFTER,
-            reqwest::header::HeaderValue::from_static("12"),
-        );
-        assert_eq!(retry_after_ms_from_headers(&headers), Some(12_000));
-    }
-
-    #[test]
-    fn retry_after_ms_from_headers_ignores_non_numeric_values() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::RETRY_AFTER,
-            reqwest::header::HeaderValue::from_static("Wed, 21 Oct 2015 07:28:00 GMT"),
-        );
-        assert_eq!(retry_after_ms_from_headers(&headers), None);
-    }
-
-    #[test]
-    fn with_retry_after_marker_appends_retry_hint() {
-        let base = "HTTP 429: rate limit exceeded".to_string();
-        assert_eq!(
-            with_retry_after_marker(base.clone(), Some(3_000)),
-            "HTTP 429: rate limit exceeded (retry_after_ms=3000)"
-        );
-        assert_eq!(
-            with_retry_after_marker(base.clone(), None),
-            "HTTP 429: rate limit exceeded"
-        );
-    }
-
-    #[test]
-    fn apply_thinking_injects_budget_for_high_effort() {
-        let provider = AnthropicProvider {
-            api_key: secrecy::Secret::new("test".into()),
-            model: "claude-opus-4-5-20251101".into(),
-            base_url: "https://api.anthropic.com".into(),
-            client: crate::shared_http_client(),
-            alias: None,
-            reasoning_effort: Some(moltis_agents::model::ReasoningEffort::High),
-            cache_retention: moltis_config::CacheRetention::Short,
-        };
-        let mut body =
-            serde_json::json!({ "model": "claude-opus-4-5-20251101", "max_tokens": 4096 });
-        provider.apply_thinking(&mut body);
-
-        assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["thinking"]["budget_tokens"], 32768);
-        // max_tokens must exceed budget_tokens
-        assert!(body["max_tokens"].as_u64().unwrap() > 32768);
-    }
-
-    #[test]
-    fn apply_thinking_skipped_when_no_effort() {
-        let provider = AnthropicProvider::new(
-            secrecy::Secret::new("test".into()),
-            "claude-opus-4-5-20251101".into(),
-            "https://api.anthropic.com".into(),
-        );
-        let mut body = serde_json::json!({ "model": "test", "max_tokens": 4096 });
-        provider.apply_thinking(&mut body);
-        assert!(body.get("thinking").is_none());
-    }
-
-    #[test]
-    fn apply_thinking_low_effort_budget() {
-        let provider = AnthropicProvider {
-            api_key: secrecy::Secret::new("test".into()),
-            model: "claude-sonnet-4-5-20250929".into(),
-            base_url: "https://api.anthropic.com".into(),
-            client: crate::shared_http_client(),
-            alias: None,
-            reasoning_effort: Some(moltis_agents::model::ReasoningEffort::Low),
-            cache_retention: moltis_config::CacheRetention::Short,
-        };
-        let mut body = serde_json::json!({ "model": "test", "max_tokens": 4096 });
-        provider.apply_thinking(&mut body);
-
-        assert_eq!(body["thinking"]["budget_tokens"], 4096);
-        // max_tokens should be bumped since it equals budget_tokens
-        assert!(body["max_tokens"].as_u64().unwrap() > 4096);
-    }
-
-    #[test]
-    fn with_reasoning_effort_creates_new_provider() {
-        use std::sync::Arc;
-        let provider = Arc::new(AnthropicProvider::new(
-            secrecy::Secret::new("test-key".into()),
-            "claude-opus-4-5-20251101".into(),
-            "https://api.anthropic.com".into(),
-        ));
-        assert!(provider.reasoning_effort().is_none());
-
-        let with_effort = provider
-            .with_reasoning_effort(moltis_agents::model::ReasoningEffort::High)
-            .expect("anthropic supports reasoning_effort");
-        assert_eq!(
-            with_effort.reasoning_effort(),
-            Some(moltis_agents::model::ReasoningEffort::High)
-        );
-        assert_eq!(with_effort.id(), "claude-opus-4-5-20251101");
-    }
-
-    #[test]
-    fn to_anthropic_messages_merges_all_system_into_top_level() {
-        use moltis_agents::model::{ChatMessage, UserContent};
-
-        let messages = vec![
-            ChatMessage::system("You are a helpful assistant."),
-            ChatMessage::User {
-                content: UserContent::Text("hello".into()),
-            },
-            ChatMessage::system("The current user datetime is 2026-03-24 01:23:45 CET."),
-            ChatMessage::User {
-                content: UserContent::Text("what time is it?".into()),
-            },
-        ];
-
-        let (system_value, out) = to_anthropic_messages(&messages, true);
-
-        // System is returned as a content-block array with cache_control.
-        let blocks = system_value
-            .expect("system should be present")
-            .as_array()
-            .expect("should be array")
-            .clone();
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0]["type"], "text");
-        assert_eq!(
-            blocks[0]["text"],
-            "You are a helpful assistant.\n\nThe current user datetime is 2026-03-24 01:23:45 CET."
-        );
-        assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
-
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0]["role"], "user");
-        assert_eq!(out[1]["role"], "user");
-    }
-
-    #[test]
-    fn system_prompt_serializes_as_content_block_array_with_cache_control() {
-        let messages = vec![
-            ChatMessage::system("You are a coding assistant."),
-            ChatMessage::User {
-                content: UserContent::Text("hi".into()),
-            },
-        ];
-
-        let (system_value, _) = to_anthropic_messages(&messages, true);
-        let blocks = system_value
-            .expect("system should be present")
-            .as_array()
-            .expect("should be array")
-            .clone();
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0]["type"], "text");
-        assert_eq!(blocks[0]["text"], "You are a coding assistant.");
-        assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
-    }
-
-    #[test]
-    fn last_user_message_gets_cache_control() {
-        let messages = vec![
-            ChatMessage::system("sys"),
-            ChatMessage::User {
-                content: UserContent::Text("first".into()),
-            },
-            ChatMessage::Assistant {
-                content: Some("reply".into()),
-                tool_calls: vec![],
-            },
-            ChatMessage::User {
-                content: UserContent::Text("second".into()),
-            },
-        ];
-
-        let (_, out) = to_anthropic_messages(&messages, true);
-
-        // First user message should NOT have cache_control.
-        assert_eq!(out[0]["content"], "first");
-
-        // Last user message should be converted to content-block array with cache_control.
-        let last_user = &out[2];
-        assert_eq!(last_user["role"], "user");
-        let content = last_user["content"].as_array().expect("should be array");
-        assert_eq!(content.len(), 1);
-        assert_eq!(content[0]["type"], "text");
-        assert_eq!(content[0]["text"], "second");
-        assert_eq!(content[0]["cache_control"]["type"], "ephemeral");
-    }
-
-    #[test]
-    fn multimodal_user_message_gets_cache_control_on_last_block() {
-        let messages = vec![ChatMessage::User {
-            content: UserContent::Multimodal(vec![
-                ContentPart::Text("describe this".into()),
-                ContentPart::Image {
-                    media_type: "image/png".into(),
-                    data: "base64data".into(),
-                },
-            ]),
-        }];
-
-        let (_, out) = to_anthropic_messages(&messages, true);
-        let content = out[0]["content"].as_array().expect("should be array");
-        assert_eq!(content.len(), 2);
-
-        // First block should NOT have cache_control.
-        assert!(content[0].get("cache_control").is_none());
-
-        // Last block (image) should have cache_control.
-        assert_eq!(content[1]["cache_control"]["type"], "ephemeral");
-    }
-
-    #[test]
-    fn no_system_returns_none() {
-        let messages = vec![ChatMessage::User {
-            content: UserContent::Text("hello".into()),
-        }];
-        let (system_value, _) = to_anthropic_messages(&messages, true);
-        assert!(system_value.is_none());
-    }
-
-    #[test]
-    fn caching_disabled_returns_plain_string_system() {
-        let messages = vec![ChatMessage::system("You are helpful."), ChatMessage::User {
-            content: UserContent::Text("hi".into()),
-        }];
-
-        let (system_value, out) = to_anthropic_messages(&messages, false);
-
-        // System should be a plain string, not content-block array.
-        let sys = system_value.expect("system should be present");
-        assert!(sys.is_string(), "expected string, got: {sys:?}");
-        assert_eq!(sys, "You are helpful.");
-
-        // User message should NOT have cache_control.
-        assert_eq!(out[0]["content"], "hi");
-    }
-
-    #[test]
-    fn cache_retention_none_skips_cache_control() {
-        let provider = AnthropicProvider {
-            api_key: secrecy::Secret::new("test".into()),
-            model: "claude-sonnet-4-5-20250929".into(),
-            base_url: "https://api.anthropic.com".into(),
-            client: crate::shared_http_client(),
-            alias: None,
-            reasoning_effort: None,
-            cache_retention: moltis_config::CacheRetention::None,
-        };
-        assert!(!provider.caching_enabled());
-    }
-
-    #[test]
-    fn cache_retention_short_enables_caching() {
-        let provider = AnthropicProvider::new(
-            secrecy::Secret::new("test".into()),
-            "claude-sonnet-4-5-20250929".into(),
-            "https://api.anthropic.com".into(),
-        );
-        assert!(provider.caching_enabled());
-    }
-}
+mod tests;

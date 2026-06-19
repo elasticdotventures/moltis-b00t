@@ -162,7 +162,13 @@ pub async fn session_upload(
         {
             Ok(result) => Some(result),
             Err(e) => {
-                warn!(session_key, error = %e, "transcription failed for uploaded audio");
+                warn!(
+                    session_key,
+                    provider = query.provider.as_deref().unwrap_or("auto"),
+                    format,
+                    error = %e,
+                    "transcription failed for uploaded audio"
+                );
                 return (
                     StatusCode::OK,
                     Json(serde_json::json!({

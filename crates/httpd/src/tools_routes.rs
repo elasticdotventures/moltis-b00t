@@ -6,7 +6,10 @@
 //! They are protected by auth middleware, but also have explicit checks to ensure
 //! they never work without authentication on non-localhost connections.
 
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use {
+    axum::{Json, extract::State, http::StatusCode, response::IntoResponse},
+    moltis_gateway::auth::AuthIdentity,
+};
 
 const CONFIG_AUTH_REQUIRED: &str = "CONFIG_AUTH_REQUIRED";
 const CONFIG_READ_FAILED: &str = "CONFIG_READ_FAILED";
@@ -29,8 +32,27 @@ fn config_error(code: &str, error: impl Into<String>) -> serde_json::Value {
 /// - Running on localhost (loopback interface only), OR
 /// - User is authenticated via session or API key
 ///
+/// When `require_admin` is true, API keys must have the `operator.admin`
+/// scope (password/passkey/loopback always have full access).
+///
 /// This is a defense-in-depth check on top of the auth middleware.
-async fn require_config_access(state: &crate::server::AppState) -> Result<(), impl IntoResponse> {
+async fn require_config_access(
+    state: &crate::server::AppState,
+    identity: Option<&AuthIdentity>,
+    require_admin: bool,
+) -> Result<(), impl IntoResponse> {
+    if require_admin
+        && let Some(id) = identity
+        && !id.has_scope("operator.admin")
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(config_error(
+                "INSUFFICIENT_SCOPE",
+                "operator.admin scope required",
+            )),
+        ));
+    }
     let gw = &state.gateway;
 
     // On localhost with no password set, allow access (backward compat for initial setup)
@@ -85,7 +107,7 @@ async fn require_config_access(state: &crate::server::AppState) -> Result<(), im
 /// Get the current configuration as TOML.
 pub async fn config_get(State(state): State<crate::server::AppState>) -> impl IntoResponse {
     // Extra security check for config access
-    if let Err(resp) = require_config_access(&state).await {
+    if let Err(resp) = require_config_access(&state, None, false).await {
         return resp.into_response();
     }
 
@@ -125,7 +147,7 @@ pub async fn config_validate(
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     // Extra security check for config access
-    if let Err(resp) = require_config_access(&state).await {
+    if let Err(resp) = require_config_access(&state, None, false).await {
         return resp.into_response();
     }
 
@@ -166,7 +188,7 @@ pub async fn config_validate(
 /// Preserves the current port from the existing config.
 pub async fn config_template(State(state): State<crate::server::AppState>) -> impl IntoResponse {
     // Extra security check for config access
-    if let Err(resp) = require_config_access(&state).await {
+    if let Err(resp) = require_config_access(&state, None, false).await {
         return resp.into_response();
     }
 
@@ -180,13 +202,46 @@ pub async fn config_template(State(state): State<crate::server::AppState>) -> im
     .into_response()
 }
 
+/// Get provenance information for configuration values.
+///
+/// Returns info about which config values are built-in defaults, user
+/// overrides, or custom additions.
+pub async fn config_provenance(State(state): State<crate::server::AppState>) -> impl IntoResponse {
+    if let Err(resp) = require_config_access(&state, None, false).await {
+        return resp.into_response();
+    }
+
+    // Use read-only load to avoid writing defaults.toml on every GET request.
+    let config = moltis_config::discover_and_load_readonly();
+
+    // Preset provenance
+    let presets = moltis_config::defaults::compute_preset_provenance(&config.agents);
+
+    // Shadowed defaults (keys in user config that shadow built-ins)
+    let path = moltis_config::find_or_default_config_path();
+    let shadowed = if path.exists() {
+        std::fs::read_to_string(&path)
+            .map(|raw| moltis_config::defaults::find_shadowed_defaults(&raw))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    Json(serde_json::json!({
+        "presets": presets,
+        "shadowed_keys": shadowed,
+    }))
+    .into_response()
+}
+
 /// Save configuration from TOML.
 pub async fn config_save(
+    identity: Option<axum::Extension<AuthIdentity>>,
     State(state): State<crate::server::AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    // Extra security check for config access
-    if let Err(resp) = require_config_access(&state).await {
+    let id_ref = identity.as_ref().map(|axum::Extension(id)| id);
+    if let Err(resp) = require_config_access(&state, id_ref, true).await {
         return resp.into_response();
     }
 
@@ -239,9 +294,12 @@ pub async fn config_save(
 ///
 /// Before restarting, the saved config is loaded from disk and validated. If the config
 /// is invalid the restart is refused so the server doesn't crash on startup.
-pub async fn restart(State(state): State<crate::server::AppState>) -> impl IntoResponse {
-    // Extra security check for config access (restart is a privileged operation)
-    if let Err(resp) = require_config_access(&state).await {
+pub async fn restart(
+    identity: Option<axum::Extension<AuthIdentity>>,
+    State(state): State<crate::server::AppState>,
+) -> impl IntoResponse {
+    let id_ref = identity.as_ref().map(|axum::Extension(id)| id);
+    if let Err(resp) = require_config_access(&state, id_ref, true).await {
         return resp.into_response();
     }
 
@@ -336,6 +394,67 @@ pub async fn restart(State(state): State<crate::server::AppState>) -> impl IntoR
     .into_response()
 }
 
+/// Perform an in-place update to the latest (or specified) version.
+///
+/// Requires `operator.admin` scope. On success with binary replacement,
+/// schedules a restart after 500 ms so the response can be sent first.
+pub async fn update(
+    identity: Option<axum::Extension<AuthIdentity>>,
+    State(state): State<crate::server::AppState>,
+    body: Option<Json<serde_json::Value>>,
+) -> impl IntoResponse {
+    let id_ref = identity.as_ref().map(|axum::Extension(id)| id);
+    if let Err(resp) = require_config_access(&state, id_ref, true).await {
+        return resp.into_response();
+    }
+
+    let requested_version = body
+        .as_ref()
+        .and_then(|Json(v)| v.get("version"))
+        .and_then(|v| v.as_str());
+
+    let releases_url = moltis_gateway::update_check::resolve_releases_url(
+        state.gateway.config.server.update_releases_url.as_deref(),
+    );
+
+    let client = match reqwest::Client::builder()
+        .user_agent(format!("moltis-gateway/{}", state.gateway.version))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(config_error("UPDATE_CLIENT_ERROR", format!("{e}"))),
+            )
+                .into_response();
+        },
+    };
+
+    match moltis_gateway::updater::perform_update(&client, &releases_url, requested_version).await {
+        Ok(ref outcome @ moltis_gateway::updater::UpdateOutcome::Updated { .. })
+        | Ok(ref outcome @ moltis_gateway::updater::UpdateOutcome::DockerUpdated { .. }) => {
+            let restarting = true;
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                tracing::info!("restarting after update via API");
+                moltis_gateway::updater::restart_process();
+            });
+            let mut json = serde_json::to_value(outcome).unwrap_or_default();
+            if let serde_json::Value::Object(ref mut map) = json {
+                map.insert("restarting".into(), serde_json::Value::Bool(restarting));
+            }
+            Json(json).into_response()
+        },
+        Ok(outcome) => Json(serde_json::to_value(&outcome).unwrap_or_default()).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(config_error("UPDATE_FAILED", format!("{e}"))),
+        )
+            .into_response(),
+    }
+}
+
 /// Validate config and return warnings.
 fn validate_config(config: &moltis_config::MoltisConfig) -> Vec<String> {
     let mut warnings = Vec::new();
@@ -349,7 +468,7 @@ fn validate_config(config: &moltis_config::MoltisConfig) -> Vec<String> {
         {
             warnings.push(
                 "Sandbox mode is available but no container runtime found. \
-                 Browser sandbox (for sandboxed sessions) requires Docker or Apple Container."
+                 Browser sandbox (for sandboxed sessions) requires Docker, Podman, or Apple Container."
                     .to_string(),
             );
         }

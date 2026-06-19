@@ -1,0 +1,647 @@
+//! Static model catalogs and OpenAI-compatible provider definitions.
+
+use crate::openai::{
+    CacheControlPolicy, OpenAiProviderCapabilities, ProbeFallbackPolicy, ProbeOutputCapPolicy,
+    RateLimitPolicy, ReasoningEffortPolicy, SystemMessageRewriteStrategy,
+};
+
+/// Known Anthropic Claude models (model_id, display_name).
+/// Current models listed first, then legacy models.
+pub(crate) const ANTHROPIC_MODELS: &[(&str, &str)] = &[
+    // Anthropic currently documents Claude 4.6 using alias IDs rather than
+    // dated snapshot IDs. Register the documented aliases instead of
+    // inventing snapshot suffixes that the API rejects.
+    ("claude-opus-4-6", "Claude Opus 4.6"),
+    ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+    ("claude-opus-4-5-20251101", "Claude Opus 4.5"),
+    ("claude-sonnet-4-5-20250929", "Claude Sonnet 4.5"),
+    ("claude-haiku-4-5-20251001", "Claude Haiku 4.5"),
+    ("claude-opus-4-1-20250805", "Claude Opus 4.1"),
+    ("claude-sonnet-4-20250514", "Claude Sonnet 4"),
+    ("claude-opus-4-20250514", "Claude Opus 4"),
+    ("claude-3-7-sonnet-20250219", "Claude 3.7 Sonnet"),
+    ("claude-3-haiku-20240307", "Claude 3 Haiku"),
+];
+
+/// Known Mistral models.
+pub(crate) const MISTRAL_MODELS: &[(&str, &str)] = &[
+    ("mistral-large-latest", "Mistral Large"),
+    ("codestral-latest", "Codestral"),
+];
+
+/// Known Cerebras models.
+pub(crate) const CEREBRAS_MODELS: &[(&str, &str)] =
+    &[("llama-4-scout-17b-16e-instruct", "Llama 4 Scout (Cerebras)")];
+
+/// Known MiniMax models.
+/// See: <https://platform.minimax.io/docs/api-reference/text-anthropic-api>
+pub(crate) const MINIMAX_MODELS: &[(&str, &str)] = &[
+    ("MiniMax-M2.7", "MiniMax M2.7"),
+    ("MiniMax-M2.7-highspeed", "MiniMax M2.7 Highspeed"),
+    ("MiniMax-M2.5", "MiniMax M2.5"),
+    ("MiniMax-M2.5-highspeed", "MiniMax M2.5 Highspeed"),
+    ("MiniMax-M2.1", "MiniMax M2.1"),
+    ("MiniMax-M2.1-highspeed", "MiniMax M2.1 Highspeed"),
+    ("MiniMax-M2", "MiniMax M2"),
+];
+
+/// Known Z.AI (Zhipu) models.
+/// See: <https://docs.z.ai/api-reference/llm/chat-completion>
+pub(crate) const ZAI_MODELS: &[(&str, &str)] = &[
+    ("glm-5", "GLM-5"),
+    ("glm-4.7", "GLM-4.7"),
+    ("glm-4.7-flash", "GLM-4.7 Flash"),
+    ("glm-4.7-flashx", "GLM-4.7 FlashX"),
+    ("glm-4.6", "GLM-4.6"),
+    ("glm-4.6v", "GLM-4.6V (Vision)"),
+    ("glm-4.6v-flash", "GLM-4.6V Flash"),
+    ("glm-4.5", "GLM-4.5"),
+    ("glm-4.5-air", "GLM-4.5 Air"),
+    ("glm-4.5-airx", "GLM-4.5 AirX"),
+    ("glm-4.5-flash", "GLM-4.5 Flash"),
+    ("glm-4.5v", "GLM-4.5V (Vision)"),
+    ("glm-4-32b-0414-128k", "GLM-4 32B 128K"),
+];
+
+/// Fireworks Kimi router model-ID prefixes.
+///
+/// These models proxy through Fireworks to Moonshot's Kimi API, which has
+/// different schema and message requirements (no strict tools, needs
+/// `reasoning_content`). Issue #810.
+const FIREWORKS_KIMI_ROUTER_PREFIXES: &[&str] = &["accounts/fireworks/routers/kimi"];
+
+/// Known Fireworks models.
+pub(crate) const FIREWORKS_MODELS: &[(&str, &str)] = &[
+    ("accounts/fireworks/models/kimi-k2p5", "Kimi K2.5"),
+    ("accounts/fireworks/models/kimi-k2p6", "Kimi K2.6"),
+    ("accounts/fireworks/models/glm-5p1", "GLM 5.1"),
+    ("accounts/fireworks/models/gpt-oss-120b", "GPT OSS 120B"),
+    (
+        "accounts/fireworks/models/deepseek-v4-pro",
+        "DeepSeek V4 Pro",
+    ),
+];
+
+/// Known Alibaba Cloud Coding Plan models.
+/// See: <https://www.alibabacloud.com/help/en/model-studio/coding-plan>
+pub(crate) const ALIBABA_CODING_MODELS: &[(&str, &str)] = &[
+    ("qwen3.6-plus", "Qwen 3.6 Plus"),
+    ("kimi-k2.5", "Kimi K2.5"),
+    ("glm-5", "GLM-5"),
+    ("MiniMax-M2.5", "MiniMax M2.5"),
+    ("qwen3.5-plus", "Qwen 3.5 Plus"),
+    ("qwen3-max-2026-01-23", "Qwen3 Max"),
+    ("qwen3-coder-next", "Qwen3 Coder Next"),
+    ("qwen3-coder-plus", "Qwen3 Coder Plus"),
+    ("glm-4.7", "GLM-4.7"),
+];
+
+/// Known DeepInfra models.
+/// See: <https://deepinfra.com/models>
+pub(crate) const DEEPINFRA_MODELS: &[(&str, &str)] = &[
+    (
+        "meta-llama/Llama-4-Maverick-17B-128E-Instruct",
+        "Llama 4 Maverick",
+    ),
+    ("meta-llama/Llama-4-Scout-17B-16E-Instruct", "Llama 4 Scout"),
+    ("deepseek-ai/DeepSeek-V3", "DeepSeek V3"),
+    ("deepseek-ai/DeepSeek-R1", "DeepSeek R1"),
+    ("Qwen/Qwen3-235B-A22B", "Qwen3 235B"),
+    ("Qwen/Qwen3-32B", "Qwen3 32B"),
+    (
+        "mistralai/Mistral-Small-24B-Instruct-2501",
+        "Mistral Small 24B",
+    ),
+    ("google/gemma-3-27b-it", "Gemma 3 27B"),
+];
+
+/// Known DeepSeek models.
+pub(crate) const DEEPSEEK_MODELS: &[(&str, &str)] = &[
+    ("deepseek-v4-flash", "DeepSeek V4 Flash"),
+    ("deepseek-v4-pro", "DeepSeek V4 Pro"),
+    ("deepseek-chat", "DeepSeek Chat"),
+    ("deepseek-reasoner", "DeepSeek Reasoner"),
+];
+
+/// Known Moonshot models.
+pub(crate) const MOONSHOT_MODELS: &[(&str, &str)] =
+    &[("kimi-k2.5", "Kimi K2.5"), ("kimi-k2.6", "Kimi K2.6")];
+
+/// Known Google Gemini models.
+/// See: <https://ai.google.dev/gemini-api/docs/models>
+pub(crate) const GEMINI_MODELS: &[(&str, &str)] = &[
+    ("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview"),
+    ("gemini-3.1-flash-lite", "Gemini 3.1 Flash-Lite"),
+    ("gemini-3-flash-preview", "Gemini 3 Flash Preview"),
+    ("gemini-2.5-flash", "Gemini 2.5 Flash"),
+    ("gemini-2.5-pro", "Gemini 2.5 Pro"),
+];
+
+/// OpenAI-compatible provider definition for table-driven registration.
+pub(crate) struct OpenAiCompatDef {
+    pub(crate) config_name: &'static str,
+    pub(crate) env_key: &'static str,
+    pub(crate) env_base_url_key: &'static str,
+    pub(crate) default_base_url: &'static str,
+    pub(crate) models: &'static [(&'static str, &'static str)],
+    /// Whether to attempt `/models` discovery by default. Providers whose API
+    /// does not expose a models endpoint (e.g. MiniMax returns 404) should set
+    /// this to `false` so the static catalog is used without a noisy warning.
+    /// Users can still override via `fetch_models = true` in config.
+    pub(crate) supports_model_discovery: bool,
+    /// When `false`, a dummy API key (the provider name) is used if none is
+    /// configured. Intended for local servers that don't authenticate.
+    pub(crate) requires_api_key: bool,
+    /// Local-only providers (Ollama, LM Studio) are skipped unless the user
+    /// has an explicit `[providers.<name>]` entry, a `_BASE_URL` env var, or
+    /// configured models. This avoids probing localhost when nothing is running.
+    /// Also ensures model discovery is always attempted (never short-circuited
+    /// by the empty-catalog heuristic).
+    pub(crate) local_only: bool,
+    /// Explicit provider behavior policies. Never inferred from provider name or URL.
+    pub(crate) capabilities: OpenAiProviderCapabilities,
+}
+
+impl OpenAiCompatDef {
+    const DEFAULT: Self = Self {
+        config_name: "",
+        env_key: "",
+        env_base_url_key: "",
+        default_base_url: "",
+        models: &[],
+        supports_model_discovery: true,
+        requires_api_key: true,
+        local_only: false,
+        capabilities: OpenAiProviderCapabilities::DEFAULT,
+    };
+}
+
+pub(crate) const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
+    OpenAiCompatDef {
+        config_name: "mistral",
+        env_key: "MISTRAL_API_KEY",
+        env_base_url_key: "MISTRAL_BASE_URL",
+        default_base_url: "https://api.mistral.ai/v1",
+        models: MISTRAL_MODELS,
+        capabilities: OpenAiProviderCapabilities {
+            supports_user_name: false,
+            rate_limit_policy: RateLimitPolicy::Mistral,
+            ..OpenAiProviderCapabilities::DEFAULT
+        },
+        ..OpenAiCompatDef::DEFAULT
+    },
+    OpenAiCompatDef {
+        config_name: "openrouter",
+        env_key: "OPENROUTER_API_KEY",
+        env_base_url_key: "OPENROUTER_BASE_URL",
+        default_base_url: "https://openrouter.ai/api/v1",
+        capabilities: OpenAiProviderCapabilities {
+            default_strict_tools: false,
+            cache_control_policy: CacheControlPolicy::OpenRouterAnthropic,
+            ..OpenAiProviderCapabilities::DEFAULT
+        },
+        ..OpenAiCompatDef::DEFAULT
+    },
+    OpenAiCompatDef {
+        config_name: "cerebras",
+        env_key: "CEREBRAS_API_KEY",
+        env_base_url_key: "CEREBRAS_BASE_URL",
+        default_base_url: "https://api.cerebras.ai/v1",
+        models: CEREBRAS_MODELS,
+        ..OpenAiCompatDef::DEFAULT
+    },
+    OpenAiCompatDef {
+        config_name: "minimax",
+        env_key: "MINIMAX_API_KEY",
+        env_base_url_key: "MINIMAX_BASE_URL",
+        default_base_url: "https://api.minimax.io/v1",
+        models: MINIMAX_MODELS,
+        // MiniMax API does not expose a /models endpoint (returns 404).
+        supports_model_discovery: false,
+        capabilities: OpenAiProviderCapabilities {
+            supports_user_name: false,
+            system_message_rewrite: SystemMessageRewriteStrategy::InlineIntoFirstUser,
+            ..OpenAiProviderCapabilities::DEFAULT
+        },
+        ..OpenAiCompatDef::DEFAULT
+    },
+    OpenAiCompatDef {
+        config_name: "moonshot",
+        env_key: "MOONSHOT_API_KEY",
+        env_base_url_key: "MOONSHOT_BASE_URL",
+        default_base_url: "https://api.moonshot.ai/v1",
+        models: MOONSHOT_MODELS,
+        capabilities: OpenAiProviderCapabilities {
+            default_reasoning_content_on_tool_messages: true,
+            ..OpenAiProviderCapabilities::DEFAULT
+        },
+        ..OpenAiCompatDef::DEFAULT
+    },
+    OpenAiCompatDef {
+        config_name: "zai",
+        env_key: "Z_API_KEY",
+        env_base_url_key: "Z_BASE_URL",
+        default_base_url: "https://api.z.ai/api/paas/v4",
+        models: ZAI_MODELS,
+        ..OpenAiCompatDef::DEFAULT
+    },
+    OpenAiCompatDef {
+        config_name: "zai-code",
+        env_key: "Z_CODE_API_KEY",
+        env_base_url_key: "Z_CODE_BASE_URL",
+        default_base_url: "https://api.z.ai/api/coding/paas/v4",
+        models: ZAI_MODELS,
+        ..OpenAiCompatDef::DEFAULT
+    },
+    OpenAiCompatDef {
+        config_name: "venice",
+        env_key: "VENICE_API_KEY",
+        env_base_url_key: "VENICE_BASE_URL",
+        default_base_url: "https://api.venice.ai/api/v1",
+        ..OpenAiCompatDef::DEFAULT
+    },
+    OpenAiCompatDef {
+        config_name: "nearai",
+        env_key: "NEARAI_API_KEY",
+        env_base_url_key: "NEARAI_BASE_URL",
+        default_base_url: "https://cloud-api.near.ai/v1",
+        models: &[],
+        supports_model_discovery: true,
+        capabilities: OpenAiProviderCapabilities {
+            // NEAR AI does not support the `strict` field in tool schemas.
+            default_strict_tools: false,
+            omits_strict_tool_field: true,
+            probe_output_cap_policy: ProbeOutputCapPolicy::MaxTokens,
+            reasoning_effort_policy: ReasoningEffortPolicy::Unsupported,
+            ..OpenAiProviderCapabilities::DEFAULT
+        },
+        ..OpenAiCompatDef::DEFAULT
+    },
+    OpenAiCompatDef {
+        config_name: "deepinfra",
+        env_key: "DEEPINFRA_API_KEY",
+        env_base_url_key: "DEEPINFRA_BASE_URL",
+        default_base_url: "https://api.deepinfra.com/v1/openai",
+        models: DEEPINFRA_MODELS,
+        ..OpenAiCompatDef::DEFAULT
+    },
+    OpenAiCompatDef {
+        config_name: "deepseek",
+        env_key: "DEEPSEEK_API_KEY",
+        env_base_url_key: "DEEPSEEK_BASE_URL",
+        default_base_url: "https://api.deepseek.com",
+        models: DEEPSEEK_MODELS,
+        capabilities: OpenAiProviderCapabilities {
+            reasoning_effort_policy: ReasoningEffortPolicy::DeepSeek,
+            reasoning_content_model_prefixes: &["deepseek-v4"],
+            ..OpenAiProviderCapabilities::DEFAULT
+        },
+        ..OpenAiCompatDef::DEFAULT
+    },
+    OpenAiCompatDef {
+        config_name: "fireworks",
+        env_key: "FIREWORKS_API_KEY",
+        env_base_url_key: "FIREWORKS_BASE_URL",
+        default_base_url: "https://api.fireworks.ai/inference/v1",
+        models: FIREWORKS_MODELS,
+        capabilities: OpenAiProviderCapabilities {
+            rejects_null_in_enums: true,
+            // Kimi router models proxy to Moonshot which requires
+            // reasoning_content and rejects strict tool schemas (#810).
+            reasoning_content_model_prefixes: FIREWORKS_KIMI_ROUTER_PREFIXES,
+            non_strict_tools_model_prefixes: FIREWORKS_KIMI_ROUTER_PREFIXES,
+            ..OpenAiProviderCapabilities::DEFAULT
+        },
+        ..OpenAiCompatDef::DEFAULT
+    },
+    OpenAiCompatDef {
+        config_name: "ollama",
+        env_key: "OLLAMA_API_KEY",
+        env_base_url_key: "OLLAMA_BASE_URL",
+        default_base_url: "http://localhost:11434/v1",
+        requires_api_key: false,
+        local_only: true,
+        capabilities: OpenAiProviderCapabilities {
+            probe_fallback_policy: ProbeFallbackPolicy::OllamaNativeShow,
+            qwen_models_require_single_leading_system: true,
+            ..OpenAiProviderCapabilities::DEFAULT
+        },
+        ..OpenAiCompatDef::DEFAULT
+    },
+    OpenAiCompatDef {
+        config_name: "lmstudio",
+        env_key: "LMSTUDIO_API_KEY",
+        env_base_url_key: "LMSTUDIO_BASE_URL",
+        default_base_url: "http://127.0.0.1:1234/v1",
+        requires_api_key: false,
+        local_only: true,
+        ..OpenAiCompatDef::DEFAULT
+    },
+    OpenAiCompatDef {
+        config_name: "alibaba-coding",
+        env_key: "ALIBABA_CODING_API_KEY",
+        env_base_url_key: "ALIBABA_CODING_BASE_URL",
+        default_base_url: "https://coding-intl.dashscope.aliyuncs.com/v1",
+        models: ALIBABA_CODING_MODELS,
+        capabilities: OpenAiProviderCapabilities {
+            qwen_models_require_single_leading_system: true,
+            ..OpenAiProviderCapabilities::DEFAULT
+        },
+        ..OpenAiCompatDef::DEFAULT
+    },
+    OpenAiCompatDef {
+        config_name: "gemini",
+        env_key: "GEMINI_API_KEY",
+        env_base_url_key: "GEMINI_BASE_URL",
+        default_base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+        models: GEMINI_MODELS,
+        capabilities: OpenAiProviderCapabilities {
+            default_strict_tools: false,
+            requires_gemini_tool_call_extra_content: true,
+            ..OpenAiProviderCapabilities::DEFAULT
+        },
+        ..OpenAiCompatDef::DEFAULT
+    },
+];
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use {super::*, crate::catalog_to_discovered};
+
+    #[test]
+    fn model_lists_not_empty() {
+        assert!(!ANTHROPIC_MODELS.is_empty());
+        assert!(!crate::openai::default_model_catalog().is_empty());
+        assert!(!MISTRAL_MODELS.is_empty());
+        assert!(!CEREBRAS_MODELS.is_empty());
+        assert!(!MINIMAX_MODELS.is_empty());
+        assert!(!ZAI_MODELS.is_empty());
+        assert!(!DEEPINFRA_MODELS.is_empty());
+        assert!(!MOONSHOT_MODELS.is_empty());
+        assert!(!GEMINI_MODELS.is_empty());
+    }
+
+    #[test]
+    fn model_lists_have_unique_ids() {
+        let openai_models = crate::openai::default_model_catalog();
+        let mut openai_ids: Vec<&str> = openai_models.iter().map(|m| m.id.as_str()).collect();
+        openai_ids.sort();
+        openai_ids.dedup();
+        assert_eq!(
+            openai_ids.len(),
+            openai_models.len(),
+            "duplicate OpenAI model IDs found"
+        );
+
+        for models in [
+            ANTHROPIC_MODELS,
+            MISTRAL_MODELS,
+            CEREBRAS_MODELS,
+            DEEPINFRA_MODELS,
+            MINIMAX_MODELS,
+            ZAI_MODELS,
+            MOONSHOT_MODELS,
+            GEMINI_MODELS,
+        ] {
+            let mut ids: Vec<&str> = models.iter().map(|(id, _)| *id).collect();
+            ids.sort();
+            ids.dedup();
+            assert_eq!(ids.len(), models.len(), "duplicate model IDs found");
+        }
+    }
+
+    #[test]
+    fn anthropic_catalog_uses_documented_claude_46_aliases() {
+        let anthropic_ids: Vec<&str> = ANTHROPIC_MODELS.iter().map(|(id, _)| *id).collect();
+
+        assert!(anthropic_ids.contains(&"claude-opus-4-6"));
+        assert!(anthropic_ids.contains(&"claude-sonnet-4-6"));
+        assert!(!anthropic_ids.contains(&"claude-opus-4-6-20260301"));
+        assert!(!anthropic_ids.contains(&"claude-sonnet-4-6-20260301"));
+        assert!(!anthropic_ids.contains(&"claude-haiku-4-6-20260301"));
+    }
+
+    #[test]
+    fn openai_compat_providers_have_unique_names() {
+        let mut names: Vec<&str> = OPENAI_COMPAT_PROVIDERS
+            .iter()
+            .map(|d| d.config_name)
+            .collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), OPENAI_COMPAT_PROVIDERS.len());
+    }
+
+    #[test]
+    fn openai_compat_providers_have_valid_urls() {
+        for def in OPENAI_COMPAT_PROVIDERS {
+            assert!(
+                def.default_base_url.starts_with("http://")
+                    || def.default_base_url.starts_with("https://"),
+                "{}: invalid base URL: {}",
+                def.config_name,
+                def.default_base_url
+            );
+        }
+    }
+
+    #[test]
+    fn openai_compat_providers_env_keys_not_empty() {
+        for def in OPENAI_COMPAT_PROVIDERS {
+            assert!(
+                !def.env_key.is_empty(),
+                "{}: env_key is empty",
+                def.config_name
+            );
+            assert!(
+                !def.env_base_url_key.is_empty(),
+                "{}: env_base_url_key is empty",
+                def.config_name
+            );
+        }
+    }
+
+    #[test]
+    fn strict_name_providers_disable_user_names() {
+        let mistral = OPENAI_COMPAT_PROVIDERS
+            .iter()
+            .find(|d| d.config_name == "mistral")
+            .expect("mistral entry must exist");
+        let minimax = OPENAI_COMPAT_PROVIDERS
+            .iter()
+            .find(|d| d.config_name == "minimax")
+            .expect("minimax entry must exist");
+
+        assert!(!mistral.capabilities.supports_user_name);
+        assert!(!minimax.capabilities.supports_user_name);
+    }
+
+    #[test]
+    fn deepseek_preserves_reasoning_content_only_for_v4_tool_replay() {
+        let deepseek = OPENAI_COMPAT_PROVIDERS
+            .iter()
+            .find(|d| d.config_name == "deepseek")
+            .expect("deepseek entry must exist");
+
+        assert!(
+            !deepseek
+                .capabilities
+                .default_reasoning_content_on_tool_messages
+        );
+        assert_eq!(deepseek.capabilities.reasoning_content_model_prefixes, &[
+            "deepseek-v4"
+        ]);
+    }
+
+    #[test]
+    fn alibaba_coding_provider_exists() {
+        let alibaba = OPENAI_COMPAT_PROVIDERS
+            .iter()
+            .find(|d| d.config_name == "alibaba-coding")
+            .expect("alibaba-coding entry must exist");
+        assert_eq!(alibaba.env_key, "ALIBABA_CODING_API_KEY");
+        assert_eq!(
+            alibaba.default_base_url,
+            "https://coding-intl.dashscope.aliyuncs.com/v1"
+        );
+        assert!(alibaba.requires_api_key);
+        assert!(!alibaba.local_only);
+        assert!(alibaba.supports_model_discovery);
+    }
+
+    #[test]
+    fn nearai_provider_exists() {
+        let nearai = OPENAI_COMPAT_PROVIDERS
+            .iter()
+            .find(|d| d.config_name == "nearai")
+            .expect("nearai entry must exist");
+        assert_eq!(nearai.env_key, "NEARAI_API_KEY");
+        assert_eq!(nearai.env_base_url_key, "NEARAI_BASE_URL");
+        assert_eq!(nearai.default_base_url, "https://cloud-api.near.ai/v1");
+        assert!(nearai.requires_api_key);
+        assert!(!nearai.local_only);
+        assert!(nearai.supports_model_discovery);
+        assert!(nearai.capabilities.omits_strict_tool_field);
+        assert_eq!(
+            nearai.capabilities.probe_output_cap_policy,
+            ProbeOutputCapPolicy::MaxTokens
+        );
+        assert_eq!(
+            nearai.capabilities.reasoning_effort_policy,
+            ReasoningEffortPolicy::Unsupported
+        );
+    }
+
+    #[test]
+    fn alibaba_coding_models_no_duplicates() {
+        let mut ids: Vec<&str> = ALIBABA_CODING_MODELS.iter().map(|(id, _)| *id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            ALIBABA_CODING_MODELS.len(),
+            "duplicate model IDs"
+        );
+    }
+
+    #[test]
+    fn alibaba_coding_models_have_recommended() {
+        let discovered = catalog_to_discovered(ALIBABA_CODING_MODELS, 4);
+        let recommended_count = discovered.iter().filter(|m| m.recommended).count();
+        assert_eq!(recommended_count, 4);
+    }
+
+    #[test]
+    fn ollama_default_base_url_uses_localhost() {
+        let ollama = OPENAI_COMPAT_PROVIDERS
+            .iter()
+            .find(|d| d.config_name == "ollama")
+            .expect("ollama entry must exist");
+        assert!(
+            ollama.default_base_url.contains("localhost"),
+            "expected 'localhost' in Ollama default_base_url, got: {}",
+            ollama.default_base_url,
+        );
+    }
+
+    #[test]
+    fn fireworks_kimi_router_prefixes_cover_router_models() {
+        let fireworks = OPENAI_COMPAT_PROVIDERS
+            .iter()
+            .find(|d| d.config_name == "fireworks")
+            .expect("fireworks entry must exist");
+
+        let prefixes = fireworks.capabilities.reasoning_content_model_prefixes;
+        let matches = |id: &str| prefixes.iter().any(|p| id.starts_with(p));
+
+        assert!(matches("accounts/fireworks/routers/kimi-k2p5-turbo"));
+        assert!(!matches("accounts/fireworks/models/glm-5p1"));
+        assert!(!matches("accounts/fireworks/models/kimi-k2p5"));
+
+        // non_strict_tools_model_prefixes should use the same prefixes
+        assert_eq!(
+            fireworks.capabilities.reasoning_content_model_prefixes,
+            fireworks.capabilities.non_strict_tools_model_prefixes,
+        );
+    }
+
+    /// Cross-validate that every provider registered in this crate appears in
+    /// the canonical `KNOWN_PROVIDER_NAMES` list in `moltis-config`.
+    ///
+    /// If this test fails, you added a provider to `moltis-providers` without
+    /// updating `crates/config/src/schema/providers.rs::KNOWN_PROVIDER_NAMES`.
+    #[test]
+    fn all_registered_providers_in_canonical_known_list() {
+        use moltis_config::schema::KNOWN_PROVIDER_NAMES;
+
+        // Built-in providers
+        let mut provider_names: Vec<&str> = vec!["anthropic", "openai"];
+
+        // OpenAI-compatible table-driven providers
+        for def in OPENAI_COMPAT_PROVIDERS {
+            provider_names.push(def.config_name);
+        }
+
+        // Feature-gated providers (always check names, regardless of feature).
+        //
+        // NOTE: This list must be maintained manually because `#[cfg(feature)]`
+        // attributes make it impossible to discover these names at test time
+        // when the feature is disabled.  When adding a new feature-gated
+        // provider registration in `registry/registration.rs` (e.g. a new
+        // `register_*_providers` method gated behind a cargo feature), add its
+        // config name here too.
+        provider_names.extend_from_slice(&[
+            "github-copilot",
+            "kimi-code",
+            "local-llm",
+            "openai-codex",
+            "groq",
+            "xai",
+        ]);
+
+        for name in &provider_names {
+            assert!(
+                KNOWN_PROVIDER_NAMES.contains(name),
+                "provider \"{name}\" is registered in moltis-providers but missing from \
+                 KNOWN_PROVIDER_NAMES in crates/config/src/schema/providers.rs — add it there"
+            );
+        }
+    }
+
+    /// Ensure `KNOWN_PROVIDER_NAMES` has no duplicates.
+    #[test]
+    fn canonical_known_list_has_no_duplicates() {
+        use moltis_config::schema::KNOWN_PROVIDER_NAMES;
+
+        let mut sorted: Vec<&str> = KNOWN_PROVIDER_NAMES.to_vec();
+        sorted.sort();
+        for window in sorted.windows(2) {
+            assert_ne!(
+                window[0], window[1],
+                "duplicate entry \"{0}\" in KNOWN_PROVIDER_NAMES",
+                window[0]
+            );
+        }
+    }
+}

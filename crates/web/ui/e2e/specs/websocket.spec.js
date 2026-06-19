@@ -1,51 +1,9 @@
 const { expect, test } = require("../base-test");
-const { navigateAndWait, waitForWsConnected, watchPageErrors } = require("../helpers");
-
-function isRetryableRpcError(message) {
-	if (typeof message !== "string") return false;
-	return message.includes("WebSocket not connected") || message.includes("WebSocket disconnected");
-}
-
-async function sendRpcFromPage(page, method, params) {
-	let lastResponse = null;
-	for (let attempt = 0; attempt < 40; attempt++) {
-		if (attempt > 0) {
-			await waitForWsConnected(page);
-			await page.waitForTimeout(100);
-		}
-		lastResponse = await page
-			.evaluate(
-				async ({ methodName, methodParams }) => {
-					var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
-					if (!appScript) throw new Error("app module script not found");
-					var appUrl = new URL(appScript.src, window.location.origin);
-					var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
-					var helpers = await import(`${prefix}js/helpers.js`);
-					return helpers.sendRpc(methodName, methodParams);
-				},
-				{
-					methodName: method,
-					methodParams: params,
-				},
-			)
-			.catch((error) => ({ ok: false, error: { message: error?.message || String(error) } }));
-
-		if (lastResponse?.ok) return lastResponse;
-		if (!isRetryableRpcError(lastResponse?.error?.message)) return lastResponse;
-	}
-
-	return lastResponse;
-}
-
-async function expectRpcOk(page, method, params) {
-	const response = await sendRpcFromPage(page, method, params);
-	expect(response?.ok, `RPC ${method} failed: ${response?.error?.message || "unknown error"}`).toBeTruthy();
-	return response;
-}
+const { expectRpcOk, navigateAndWait, sendRpcFromPage, waitForWsConnected, watchPageErrors } = require("../helpers");
 
 async function clearChatAndWait(page) {
 	await expectRpcOk(page, "chat.clear", {});
-	await expect(page.locator("#messages")).toBeEmpty({ timeout: 10_000 });
+	await expect.poll(() => page.locator("#messages .msg").count(), { timeout: 10_000 }).toBe(0);
 }
 async function waitForChatSessionReady(page) {
 	await page.waitForFunction(
@@ -100,6 +58,42 @@ async function mockRpcErrorResponse(page, method, message) {
 			};
 		},
 		{ targetMethod: method, errorMessage: message },
+	);
+}
+
+async function mockRpcOkResponse(page, method, payload) {
+	await page.evaluate(
+		async ({ targetMethod, responsePayload }) => {
+			var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app module script not found");
+			var appUrl = new URL(appScript.src, window.location.origin);
+			var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+			var stateModule = await import(`${prefix}js/state.js`);
+			var ws = stateModule.ws;
+			if (!ws) throw new Error("websocket unavailable");
+
+			if (!window.__origWebsocketSpecWsSend) {
+				window.__origWebsocketSpecWsSend = ws.send.bind(ws);
+			}
+
+			ws.send = (rawPayload) => {
+				try {
+					var parsed = JSON.parse(rawPayload);
+					if (parsed?.method === targetMethod) {
+						var resolver = stateModule.pending?.[parsed.id];
+						if (typeof resolver === "function") {
+							delete stateModule.pending[parsed.id];
+							resolver({ ok: true, payload: responsePayload });
+						}
+						return;
+					}
+				} catch (_err) {
+					// Fall through to the original sender.
+				}
+				return window.__origWebsocketSpecWsSend(rawPayload);
+			};
+		},
+		{ targetMethod: method, responsePayload: payload },
 	);
 }
 test.describe("WebSocket connection lifecycle", () => {
@@ -190,6 +184,55 @@ test.describe("WebSocket connection lifecycle", () => {
 		// Verify the server is healthy via the HTTP health endpoint
 		const resp = await request.get("/health");
 		expect(resp.ok()).toBeTruthy();
+	});
+
+	test("RPC timeouts identify the slow method instead of reporting disconnect", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		const warnings = [];
+		page.on("console", (msg) => {
+			if (msg.type() === "warning") warnings.push(msg.text());
+		});
+		await page.goto("/");
+		await waitForWsConnected(page);
+
+		const res = await page.evaluate(async () => {
+			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app module script not found");
+
+			const appUrl = new URL(appScript.src, window.location.origin);
+			const prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+			const helpers = await import(`${prefix}js/helpers.js`);
+			const state = await import(`${prefix}js/state.js`);
+			const originalWs = state.ws;
+			const originalTimeout = window.__moltisTestRpcTimeoutMs;
+
+			try {
+				window.__moltisTestRpcTimeoutMs = 1_000;
+				state.setWs({
+					readyState: WebSocket.OPEN,
+					send() {
+						// Intentionally never resolves; this exercises the client timeout path.
+					},
+				});
+
+				return await helpers.sendRpc("test.slow_method", {});
+			} finally {
+				state.setWs(originalWs);
+				window.__moltisTestRpcTimeoutMs = originalTimeout;
+			}
+		});
+
+		expect(res).toMatchObject({
+			ok: false,
+			error: {
+				code: "TIMEOUT",
+			},
+		});
+		expect(res.error.message).toContain("test.slow_method");
+		expect(res.error.message).not.toContain("WebSocket disconnected");
+		expect(warnings.some((warning) => warning.includes("RPC request timed out"))).toBeTruthy();
+		expect(warnings.some((warning) => warning.includes("test.slow_method"))).toBeTruthy();
+		expect(pageErrors).toEqual([]);
 	});
 
 	test("final chat text is kept when it includes tool output plus analysis", async ({ page }) => {
@@ -382,7 +425,8 @@ test.describe("WebSocket connection lifecycle", () => {
 		var assistant = page.locator("#messages .msg.assistant").last();
 		await expect(assistant).toContainText("voice fallback should be available");
 		await expect(assistant.locator(".msg-voice-warning")).toContainText("timeout");
-		await expect(assistant.locator(".msg-voice-action")).toHaveText("Voice it");
+		// Voice action is now an icon button in the action bar
+		await expect(assistant.locator('.msg-action-btn[title="Voice it"]')).toBeVisible();
 		expect(pageErrors).toEqual([]);
 	});
 
@@ -409,10 +453,43 @@ test.describe("WebSocket connection lifecycle", () => {
 
 		var assistant = page.locator("#messages .msg.assistant").last();
 		await expect(assistant).toContainText("try generating voice now");
-		await expect(assistant.locator(".msg-voice-action")).toHaveText("Voice it");
-		await assistant.locator(".msg-voice-action").click();
-		await expect(assistant.locator(".msg-voice-action")).toHaveText("Retry voice");
-		await expect(assistant.locator(".msg-voice-warning")).toContainText("Voice generation failed for test.");
+		var voiceBtn = assistant.locator('.msg-action-btn[title="Voice it"]');
+		await expect(voiceBtn).toBeVisible();
+		await voiceBtn.click();
+		// After failed RPC the button title reverts and a toast is shown
+		await expect(voiceBtn).toHaveAttribute("title", "Voice it");
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("voice fallback action shows generated TTS provider", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/chats/main");
+		await waitForWsConnected(page);
+		await waitForChatSessionReady(page);
+		await clearChatAndWait(page);
+		await mockRpcOkResponse(page, "sessions.voice.generate", {
+			audio: "media/main/voice-msg-999903.ogg",
+			ttsProvider: "openai",
+		});
+
+		await expectRpcOk(page, "system-event", {
+			event: "chat",
+			payload: {
+				sessionKey: "main",
+				state: "final",
+				text: "generate provider metadata",
+				messageIndex: 999903,
+				model: "test-model",
+				provider: "test-provider",
+				replyMedium: "voice",
+			},
+		});
+
+		var assistant = page.locator("#messages .msg.assistant").last();
+		var voiceBtn = assistant.locator('.msg-action-btn[title="Voice it"]');
+		await expect(voiceBtn).toBeVisible();
+		await voiceBtn.click();
+		await expect(assistant.locator(".msg-tts-provider-footer")).toContainText("TTS: OpenAI TTS (openai)");
 		expect(pageErrors).toEqual([]);
 	});
 
@@ -863,7 +940,9 @@ test.describe("WebSocket connection lifecycle", () => {
 					this.sent.push(JSON.parse(data));
 				}
 
-				close() {}
+				close() {
+					// Fake WebSocket used only for unit-style module testing.
+				}
 			}
 
 			const originalWebSocket = window.WebSocket;

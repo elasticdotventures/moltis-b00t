@@ -10,7 +10,10 @@
 pub mod auth_middleware;
 pub mod auth_routes;
 pub mod channel_webhook_middleware;
+pub mod data_routes;
 pub mod env_routes;
+pub mod error;
+pub mod login_guard;
 pub mod request_throttle;
 pub mod server;
 pub mod ssh_routes;
@@ -18,12 +21,20 @@ pub mod tools_routes;
 pub mod upload_routes;
 pub mod ws;
 
+pub use error::Error;
+
+#[cfg(feature = "cloudflare-tunnel")]
+pub mod cloudflare_tunnel_routes;
 #[cfg(feature = "graphql")]
 pub mod graphql_routes;
 #[cfg(feature = "metrics")]
 pub mod metrics_middleware;
 #[cfg(feature = "metrics")]
 pub mod metrics_routes;
+#[cfg(feature = "netbird")]
+pub mod netbird_routes;
+#[cfg(feature = "ngrok")]
+pub mod ngrok_routes;
 #[cfg(feature = "push-notifications")]
 pub mod push_routes;
 #[cfg(feature = "tailscale")]

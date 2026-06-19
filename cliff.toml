@@ -33,12 +33,15 @@ trim = true
 [git]
 commit_parsers = [
   { body = "(?i)security", group = "<!-- 5 -->Security" },
+  { group = "<!-- 0 -->Added", message = "^(Add|Create|Enable|Implement|Introduce|Ship)\\b" },
   { group = "<!-- 0 -->Added", message = "^feat(\\([^)]+\\))?!?:" },
+  { group = "<!-- 1 -->Changed", message = "^(Enhance|Improve|Refresh|Rework|Revamp|Update)\\b" },
   { group = "<!-- 1 -->Changed", message = "^perf(\\([^)]+\\))?!?:" },
   { group = "<!-- 1 -->Changed", message = "^refactor(\\([^)]+\\))?!?:" },
   { group = "<!-- 1 -->Changed", message = "^revert(\\([^)]+\\))?!?:" },
   { group = "<!-- 2 -->Deprecated", message = "(?i)^.*deprecat.*$" },
   { group = "<!-- 3 -->Removed", message = "(?i)^.*(remove|delete|drop).*$" },
+  { group = "<!-- 4 -->Fixed", message = "^(Avoid|Correct|Fix|Harden|Prevent|Repair|Resolve|Stabilize)\\b" },
   { group = "<!-- 4 -->Fixed", message = "^fix(\\([^)]+\\))?!?:" },
   { group = "<!-- 5 -->Security", message = "(?i)^.*security.*$" },
   { message = "^build(\\([^)]+\\))?!?:", skip = true },

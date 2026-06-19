@@ -14,12 +14,13 @@ use axum::{
 #[cfg(feature = "web-ui")]
 use tracing::{debug, warn};
 
-use moltis_gateway::{
-    auth::{AuthIdentity, AuthMethod, CredentialStore},
-    state::GatewayState,
+use {
+    moltis_auth::locality::is_local_connection,
+    moltis_gateway::{
+        auth::{AuthIdentity, AuthMethod, CredentialStore},
+        state::GatewayState,
+    },
 };
-
-use crate::server::is_local_connection;
 
 /// Session cookie name.
 pub const SESSION_COOKIE: &str = "moltis_session";
@@ -53,15 +54,21 @@ pub async fn check_auth(
     is_local: bool,
 ) -> AuthResult {
     if store.is_auth_disabled() {
-        return AuthResult::Allowed(AuthIdentity {
-            method: AuthMethod::Loopback,
-        });
+        return if is_local {
+            AuthResult::Allowed(AuthIdentity {
+                method: AuthMethod::Loopback,
+                scopes: Vec::new(),
+            })
+        } else {
+            AuthResult::SetupRequired
+        };
     }
 
     if !store.is_setup_complete() {
         return if is_local {
             AuthResult::Allowed(AuthIdentity {
                 method: AuthMethod::Loopback,
+                scopes: Vec::new(),
             })
         } else {
             AuthResult::SetupRequired
@@ -74,15 +81,17 @@ pub async fn check_auth(
     {
         return AuthResult::Allowed(AuthIdentity {
             method: AuthMethod::Password,
+            scopes: Vec::new(),
         });
     }
 
     // Check Bearer API key.
     if let Some(key) = bearer_token(headers)
-        && store.verify_api_key(key).await.ok().flatten().is_some()
+        && let Some(verification) = store.verify_api_key(key).await.ok().flatten()
     {
         return AuthResult::Allowed(AuthIdentity {
             method: AuthMethod::ApiKey,
+            scopes: verification.scopes,
         });
     }
 
@@ -103,6 +112,15 @@ pub async fn auth_gate(
     next: Next,
 ) -> axum::response::Response {
     let path = request.uri().path();
+
+    // Trace every SPA page request to diagnose CI hangs.
+    if !path.starts_with("/api/")
+        && !path.starts_with("/assets/")
+        && path != "/health"
+        && path != "/ws"
+    {
+        tracing::warn!(path, "auth_gate: SPA request entering middleware");
+    }
 
     // Public paths — no auth needed.
     if is_public_path(path) {
@@ -147,14 +165,21 @@ pub async fn auth_gate(
                 // render without full auth (#310, #350).
                 request.extensions_mut().insert(AuthIdentity {
                     method: AuthMethod::Loopback,
+                    scopes: Vec::new(),
                 });
                 next.run(request).await
             } else {
                 // Remote connections to other pages when auth is not
-                // configured yet: redirect to a static "setup required"
-                // page instead of passing through, which would cause a
-                // redirect loop between `/` and `/onboarding` (#350).
-                Redirect::to("/setup-required").into_response()
+                // configured yet: send them to /onboarding so they can
+                // complete first-time setup via the setup-code flow
+                // (#350, #646).  The original redirect loop between `/`
+                // and `/onboarding` was fixed separately at the SPA
+                // template layer via `should_redirect_from_onboarding`,
+                // which keeps remote visitors on /onboarding while auth
+                // setup is pending.  The setup code (printed to stdout)
+                // still prevents an unauthorized remote visitor from
+                // claiming the instance.
+                Redirect::to("/onboarding").into_response()
             }
         },
         AuthResult::Unauthorized => {
@@ -175,6 +200,7 @@ pub async fn auth_gate(
                     debug!(path, remote = %addr, "auth bypass: local request during onboarding");
                     request.extensions_mut().insert(AuthIdentity {
                         method: AuthMethod::Loopback,
+                        scopes: Vec::new(),
                     });
                     return next.run(request).await;
                 }
@@ -223,7 +249,17 @@ fn is_public_path(path: &str) -> bool {
             | "/ws"
     ) || path.starts_with("/api/auth/")
         || path.starts_with("/api/public/")
-        || path.starts_with("/api/channels/msteams/")
+        || {
+            #[cfg(feature = "msteams")]
+            {
+                path.starts_with("/api/channels/msteams/")
+            }
+            #[cfg(not(feature = "msteams"))]
+            {
+                false
+            }
+        }
+        || path.starts_with("/api/webhooks/ingest/")
         || path.starts_with("/assets/")
         || path.starts_with("/share/")
 }
@@ -333,6 +369,36 @@ where
     }
 }
 
+// ── RequireAdmin extractor ───────────────────────────────────────────────────
+
+/// Axum extractor that requires the `operator.admin` scope.
+///
+/// Use on routes that modify server configuration, restart the process,
+/// or manage credentials. Returns 403 if the authenticated identity lacks
+/// the required scope.
+pub struct RequireAdmin(pub AuthIdentity);
+
+impl<S> FromRequestParts<S> for RequireAdmin
+where
+    S: Send + Sync,
+    Arc<CredentialStore>: FromRef<S>,
+    Arc<GatewayState>: FromRef<S>,
+{
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let AuthSession(identity) = AuthSession::from_request_parts(parts, state).await?;
+        if identity.has_scope("operator.admin") {
+            Ok(RequireAdmin(identity))
+        } else {
+            Err((
+                StatusCode::FORBIDDEN,
+                "insufficient scope: operator.admin required",
+            ))
+        }
+    }
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Extract the Cookie header value.
@@ -365,7 +431,7 @@ pub fn parse_cookie<'a>(header: &'a str, name: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {super::*, sqlx::SqlitePool};
 
     #[test]
     fn test_parse_cookie() {
@@ -403,5 +469,31 @@ mod tests {
     #[test]
     fn public_identity_path_is_public() {
         assert!(is_public_path("/api/public/identity"));
+    }
+
+    #[tokio::test]
+    async fn auth_disabled_still_requires_setup_for_remote_requests()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pool = SqlitePool::connect("sqlite::memory:").await?;
+        let auth_config = moltis_config::AuthConfig {
+            disabled: true,
+            ..Default::default()
+        };
+        let store = CredentialStore::with_config(pool, &auth_config).await?;
+        let headers = HeaderMap::new();
+
+        assert!(matches!(
+            check_auth(&store, &headers, true).await,
+            AuthResult::Allowed(AuthIdentity {
+                method: AuthMethod::Loopback,
+                ..
+            })
+        ));
+        assert!(matches!(
+            check_auth(&store, &headers, false).await,
+            AuthResult::SetupRequired
+        ));
+
+        Ok(())
     }
 }

@@ -1,320 +1,136 @@
-// ── Shared mutable state ────────────────────────────────────
-import * as sig from "./signals.js";
+// E2E test compatibility shim.
+//
+// With Vite bundling, individual modules are no longer served. The real
+// state module lives inside the bundle but is exposed on
+// window.__moltis_state from app.tsx / onboarding-app.tsx.
+//
+// This shim re-exports everything the e2e tests need. All mutable
+// values use `export let` with a requestAnimationFrame sync loop so
+// reads always return the current value from the bundled state.
 
-export var ws = null;
-export var reqId = 0;
-export var connected = false;
-export var subscribed = false;
-export var reconnectDelay = 1000;
-export var pending = {};
-export var models = [];
-export var activeSessionKey = localStorage.getItem("moltis-session") || "main";
-export var activeProjectId = localStorage.getItem("moltis-project") || "";
-export var sessions = [];
-export var projects = [];
-
-// Chat-page specific state (persists across page transitions)
-export var streamEl = null;
-export var streamText = "";
-export var lastToolOutput = "";
-export var voicePending = false;
-export var chatHistory = JSON.parse(localStorage.getItem("moltis-chat-history") || "[]");
-export var chatHistoryIdx = -1;
-export var chatHistoryDraft = "";
-// Client-side sequence counter for message ordering diagnostics.
-// Resumed from the highest user seq in history on session switch.
-export var chatSeq = 0;
-
-// Session token usage tracking (cumulative for the current session)
-export var sessionTokens = { input: 0, output: 0 };
-// Last observed prompt input tokens (context pressure for the next turn).
-export var sessionCurrentInputTokens = 0;
-
-// Model selector elements — created dynamically inside the chat page
-export var modelCombo = null;
-export var modelComboBtn = null;
-export var modelComboLabel = null;
-export var modelDropdown = null;
-export var modelSearchInput = null;
-export var modelDropdownList = null;
-export var selectedModelId = localStorage.getItem("moltis-model") || "";
-export var modelIdx = -1;
-
-// Node selector elements — created dynamically inside the chat page
-export var nodeCombo = null;
-export var nodeComboBtn = null;
-export var nodeComboLabel = null;
-export var nodeDropdown = null;
-export var nodeDropdownList = null;
-
-// Session project combo (in chat header)
-export var projectCombo = null;
-export var projectComboBtn = null;
-export var projectComboLabel = null;
-export var projectDropdown = null;
-export var projectDropdownList = null;
-
-// Sandbox toggle
-export var sandboxToggleBtn = null;
-export var sandboxLabel = null;
-export var sessionSandboxEnabled = true;
-export var sessionSandboxImage = null;
-export var sandboxImageBtn = null;
-export var sandboxImageDropdown = null;
-export var sandboxImageLabel = null;
-
-// Chat page DOM refs
-export var chatMsgBox = null;
-export var chatInput = null;
-export var chatSendBtn = null;
-export var chatBatchLoading = false;
-export var sessionSwitchInProgress = false;
-// Highest message index loaded from session history; used to deduplicate
-// real-time events that duplicate already-rendered history entries.
-export var lastHistoryIndex = -1;
-export var sessionContextWindow = 0;
-export var sessionToolsEnabled = true;
-export var sessionExecMode = "host";
-export var sessionExecPromptSymbol = "$";
-export var hostExecIsRoot = false;
-export var commandModeEnabled = false;
-
-// Provider/channel page refresh callbacks
-export var refreshProvidersPage = null;
-export var refreshChannelsPage = null;
-export var channelEventUnsub = null;
-
-// Prefetched channel data
-export var cachedChannels = null;
-export function setCachedChannels(v) {
-	cachedChannels = v;
-	sig.cachedChannels.value = v;
+function state() {
+	return window.__moltis_state || {};
 }
 
-// Sandbox
-export var sandboxInfo = null;
+// Default export — proxy to the bundled state namespace, even if imported early.
+export default new Proxy({}, {
+	get(_target, prop) {
+		return state()[prop];
+	},
+});
 
-// Logs
-export var logsEventHandler = null;
+// ── Live-synced state (export let + rAF) ────────────────────
+// ES module `export let` creates live bindings that update when
+// reassigned. We sync all mutable state on each animation frame.
+export let connected = state().connected;
+export let ws = state().ws;
+export let pending = state().pending;
+export let reqId = state().reqId;
+export let activeSessionKey = state().activeSessionKey;
+export let sessions = state().sessions;
+export let models = state().models;
+export let chatSeq = state().chatSeq;
+export let chatInput = state().chatInput;
+export let chatSendBtn = state().chatSendBtn;
+export let chatMsgBox = state().chatMsgBox;
+export let sessionTokens = state().sessionTokens;
+export let sessionCurrentInputTokens = state().sessionCurrentInputTokens;
+export let sessionCurrentContextTokens = state().sessionCurrentContextTokens;
+export let sessionContextWindow = state().sessionContextWindow;
+export let sessionToolsEnabled = state().sessionToolsEnabled;
+export let sessionExecMode = state().sessionExecMode;
+export let sessionExecPromptSymbol = state().sessionExecPromptSymbol;
+export let commandModeEnabled = state().commandModeEnabled;
+export let streamEl = state().streamEl;
+export let streamText = state().streamText;
+export let voicePending = state().voicePending;
+export let sandboxInfo = state().sandboxInfo;
+export let cachedChannels = state().cachedChannels;
+export let selectedModelId = state().selectedModelId;
+export let nodeCombo = state().nodeCombo;
+export let nodeComboBtn = state().nodeComboBtn;
+export let nodeComboLabel = state().nodeComboLabel;
+export let nodeDropdown = state().nodeDropdown;
+export let nodeDropdownList = state().nodeDropdownList;
 
-// Network audit
-export var networkAuditEventHandler = null;
-export var unseenErrors = 0;
-export var unseenWarns = 0;
+// Sync all mutable state from the bundled namespace on each frame.
+function _sync() {
+	const S = state();
+	connected = S.connected;
+	ws = S.ws;
+	pending = S.pending;
+	reqId = S.reqId;
+	activeSessionKey = S.activeSessionKey;
+	sessions = S.sessions;
+	models = S.models;
+	chatSeq = S.chatSeq;
+	chatInput = S.chatInput;
+	chatSendBtn = S.chatSendBtn;
+	chatMsgBox = S.chatMsgBox;
+	sessionTokens = S.sessionTokens;
+	sessionCurrentInputTokens = S.sessionCurrentInputTokens;
+	sessionCurrentContextTokens = S.sessionCurrentContextTokens;
+	sessionContextWindow = S.sessionContextWindow;
+	sessionToolsEnabled = S.sessionToolsEnabled;
+	sessionExecMode = S.sessionExecMode;
+	sessionExecPromptSymbol = S.sessionExecPromptSymbol;
+	commandModeEnabled = S.commandModeEnabled;
+	streamEl = S.streamEl;
+	streamText = S.streamText;
+	voicePending = S.voicePending;
+	sandboxInfo = S.sandboxInfo;
+	cachedChannels = S.cachedChannels;
+	selectedModelId = S.selectedModelId;
+	nodeCombo = S.nodeCombo;
+	nodeComboBtn = S.nodeComboBtn;
+	nodeComboLabel = S.nodeComboLabel;
+	nodeDropdown = S.nodeDropdown;
+	nodeDropdownList = S.nodeDropdownList;
+	requestAnimationFrame(_sync);
+}
+requestAnimationFrame(_sync);
 
-// Project filter
-export var projectFilterId = localStorage.getItem("moltis-project-filter") || "";
+// ── Setters (proxy to real state module) ────────────────────
+export function setConnected(v) { state().setConnected?.(v); connected = v; }
+export function setWs(v) { state().setWs?.(v); ws = v; }
+export function setReqId(v) { state().setReqId?.(v); reqId = v; }
+export function setSubscribed(v) { state().setSubscribed?.(v); }
+export function setModels(v) { state().setModels?.(v); models = v; }
+export function setSessions(v) { state().setSessions?.(v); sessions = v; }
+export function setActiveSessionKey(v) { state().setActiveSessionKey?.(v); activeSessionKey = v; }
+export function setChatSeq(v) { state().setChatSeq?.(v); chatSeq = v; }
+export function setChatInput(v) { state().setChatInput?.(v); chatInput = v; }
+export function setChatSendBtn(v) { state().setChatSendBtn?.(v); chatSendBtn = v; }
+export function setChatMsgBox(v) { state().setChatMsgBox?.(v); chatMsgBox = v; }
+export function setStreamEl(v) { state().setStreamEl?.(v); streamEl = v; }
+export function setStreamText(v) { state().setStreamText?.(v); streamText = v; }
+export function setVoicePending(v) { state().setVoicePending?.(v); voicePending = v; }
+export function setSessionTokens(v) { state().setSessionTokens?.(v); sessionTokens = v; }
+export function setSessionCurrentInputTokens(v) { state().setSessionCurrentInputTokens?.(v); sessionCurrentInputTokens = v; }
+export function setSessionCurrentContextTokens(v) { state().setSessionCurrentContextTokens?.(v); sessionCurrentContextTokens = v; }
+export function setSessionContextWindow(v) { state().setSessionContextWindow?.(v); sessionContextWindow = v; }
+export function setSessionToolsEnabled(v) { state().setSessionToolsEnabled?.(v); sessionToolsEnabled = v; }
+export function setSessionExecMode(v) { state().setSessionExecMode?.(v); sessionExecMode = v; }
+export function setSessionExecPromptSymbol(v) { state().setSessionExecPromptSymbol?.(v); sessionExecPromptSymbol = v; }
+export function setCommandModeEnabled(v) { state().setCommandModeEnabled?.(v); commandModeEnabled = v; }
+export function setSelectedModelId(v) { state().setSelectedModelId?.(v); selectedModelId = v; }
+export function setSandboxInfo(v) { state().setSandboxInfo?.(v); sandboxInfo = v; }
+export function setCachedChannels(v) { state().setCachedChannels?.(v); cachedChannels = v; }
+export function setLastHistoryIndex(v) { state().setLastHistoryIndex?.(v); }
+export function setSessionSwitchInProgress(v) { state().setSessionSwitchInProgress?.(v); }
+export function setChatBatchLoading(v) { state().setChatBatchLoading?.(v); }
+export function setHostExecIsRoot(v) { state().setHostExecIsRoot?.(v); }
+export function setLogsEventHandler(v) { state().setLogsEventHandler?.(v); }
+export function setNetworkAuditEventHandler(v) { state().setNetworkAuditEventHandler?.(v); }
+export function setUnseenErrors(v) { state().setUnseenErrors?.(v); }
+export function setUnseenWarns(v) { state().setUnseenWarns?.(v); }
+export function setReconnectDelay(v) { state().setReconnectDelay?.(v); }
+export function setNodeCombo(v) { state().setNodeCombo?.(v); nodeCombo = v; }
+export function setNodeComboBtn(v) { state().setNodeComboBtn?.(v); nodeComboBtn = v; }
+export function setNodeComboLabel(v) { state().setNodeComboLabel?.(v); nodeComboLabel = v; }
+export function setNodeDropdown(v) { state().setNodeDropdown?.(v); nodeDropdown = v; }
+export function setNodeDropdownList(v) { state().setNodeDropdownList?.(v); nodeDropdownList = v; }
+export function setAutoScrollMode(v) { state().setAutoScrollMode?.(v); }
 
 // DOM shorthand
-export function $(id) {
-	return document.getElementById(id);
-}
-
-// ── Setters ──────────────────────────────────────────────────
-export function setWs(v) {
-	ws = v;
-}
-export function setReqId(v) {
-	reqId = v;
-}
-export function setConnected(v) {
-	connected = v;
-	sig.connected.value = v;
-}
-export function setSubscribed(v) {
-	subscribed = v;
-}
-export function setReconnectDelay(v) {
-	reconnectDelay = v;
-}
-export function setModels(v) {
-	models = v;
-	// Store signal is now owned by model-store.js; don't overwrite here.
-}
-export function setActiveSessionKey(v) {
-	activeSessionKey = v;
-	// Store signal is now owned by session-store.js; don't overwrite here.
-}
-export function setActiveProjectId(v) {
-	activeProjectId = v;
-}
-export function setSessions(v) {
-	sessions = v;
-	// Store signal is now owned by session-store.js; don't overwrite here.
-}
-export function setProjects(v) {
-	projects = v;
-	// Store signal is now owned by project-store.js; don't overwrite here.
-}
-export function setStreamEl(v) {
-	streamEl = v;
-}
-export function setStreamText(v) {
-	streamText = v;
-}
-export function setLastToolOutput(v) {
-	lastToolOutput = v;
-}
-export function setVoicePending(v) {
-	voicePending = v;
-}
-export function setChatHistory(v) {
-	chatHistory = v;
-}
-export function setChatHistoryIdx(v) {
-	chatHistoryIdx = v;
-}
-export function setChatHistoryDraft(v) {
-	chatHistoryDraft = v;
-}
-export function setChatSeq(v) {
-	chatSeq = v;
-}
-export function setSessionTokens(v) {
-	sessionTokens = v;
-}
-export function setSessionCurrentInputTokens(v) {
-	sessionCurrentInputTokens = v;
-}
-export function setModelCombo(v) {
-	modelCombo = v;
-}
-export function setModelComboBtn(v) {
-	modelComboBtn = v;
-}
-export function setModelComboLabel(v) {
-	modelComboLabel = v;
-}
-export function setModelDropdown(v) {
-	modelDropdown = v;
-}
-export function setModelSearchInput(v) {
-	modelSearchInput = v;
-}
-export function setModelDropdownList(v) {
-	modelDropdownList = v;
-}
-export function setSelectedModelId(v) {
-	selectedModelId = v;
-	// Store signal is now owned by model-store.js; don't overwrite here.
-}
-export function setModelIdx(v) {
-	modelIdx = v;
-}
-export function setNodeCombo(v) {
-	nodeCombo = v;
-}
-export function setNodeComboBtn(v) {
-	nodeComboBtn = v;
-}
-export function setNodeComboLabel(v) {
-	nodeComboLabel = v;
-}
-export function setNodeDropdown(v) {
-	nodeDropdown = v;
-}
-export function setNodeDropdownList(v) {
-	nodeDropdownList = v;
-}
-export function setProjectCombo(v) {
-	projectCombo = v;
-}
-export function setProjectComboBtn(v) {
-	projectComboBtn = v;
-}
-export function setProjectComboLabel(v) {
-	projectComboLabel = v;
-}
-export function setProjectDropdown(v) {
-	projectDropdown = v;
-}
-export function setProjectDropdownList(v) {
-	projectDropdownList = v;
-}
-export function setSandboxToggleBtn(v) {
-	sandboxToggleBtn = v;
-}
-export function setSandboxLabel(v) {
-	sandboxLabel = v;
-}
-export function setSessionSandboxEnabled(v) {
-	sessionSandboxEnabled = v;
-}
-export function setSessionSandboxImage(v) {
-	sessionSandboxImage = v;
-}
-export function setSandboxImageBtn(v) {
-	sandboxImageBtn = v;
-}
-export function setSandboxImageDropdown(v) {
-	sandboxImageDropdown = v;
-}
-export function setSandboxImageLabel(v) {
-	sandboxImageLabel = v;
-}
-export function setChatMsgBox(v) {
-	chatMsgBox = v;
-}
-export function setChatInput(v) {
-	chatInput = v;
-}
-export function setChatSendBtn(v) {
-	chatSendBtn = v;
-}
-export function setChatBatchLoading(v) {
-	chatBatchLoading = v;
-}
-export function setSessionSwitchInProgress(v) {
-	sessionSwitchInProgress = v;
-}
-export function setLastHistoryIndex(v) {
-	lastHistoryIndex = v;
-}
-export function setSessionContextWindow(v) {
-	sessionContextWindow = v;
-}
-export function setSessionToolsEnabled(v) {
-	sessionToolsEnabled = v;
-}
-export function setSessionExecMode(v) {
-	sessionExecMode = v;
-}
-export function setSessionExecPromptSymbol(v) {
-	sessionExecPromptSymbol = v;
-}
-export function setHostExecIsRoot(v) {
-	hostExecIsRoot = !!v;
-}
-export function setCommandModeEnabled(v) {
-	commandModeEnabled = !!v;
-}
-export function setRefreshProvidersPage(v) {
-	refreshProvidersPage = v;
-}
-export function setRefreshChannelsPage(v) {
-	refreshChannelsPage = v;
-}
-export function setChannelEventUnsub(v) {
-	channelEventUnsub = v;
-}
-export function setLogsEventHandler(v) {
-	logsEventHandler = v;
-}
-export function setNetworkAuditEventHandler(v) {
-	networkAuditEventHandler = v;
-}
-export function setUnseenErrors(v) {
-	unseenErrors = v;
-	sig.unseenErrors.value = v;
-}
-export function setUnseenWarns(v) {
-	unseenWarns = v;
-	sig.unseenWarns.value = v;
-}
-export function setProjectFilterId(v) {
-	projectFilterId = v;
-}
-export function setSandboxInfo(v) {
-	sandboxInfo = v;
-	sig.sandboxInfo.value = v;
-}
+export function $(id) { return state().$?.(id) ?? document.getElementById(id); }

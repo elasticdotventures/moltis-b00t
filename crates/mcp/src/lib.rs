@@ -12,7 +12,9 @@
 
 pub mod auth;
 pub mod client;
+pub mod config_parsing;
 pub mod error;
+pub mod legacy_sse_transport;
 pub mod manager;
 pub mod registry;
 pub mod remote;
@@ -25,6 +27,7 @@ pub mod types;
 pub use {
     auth::{McpAuthProvider, McpAuthState, McpOAuthOverride, McpOAuthProvider, SharedAuthProvider},
     client::{McpClient, McpClientState},
+    config_parsing::{merge_env_overrides, parse_server_config},
     error::{Context, Error, Result},
     manager::McpManager,
     registry::{McpOAuthConfig, McpRegistry, McpServerConfig, TransportType},

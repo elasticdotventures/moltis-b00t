@@ -1,6 +1,6 @@
 //! Browser action types and request/response structures.
 
-use std::fmt;
+use std::{fmt, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -89,6 +89,12 @@ pub enum BrowserKind {
     Opera,
     Vivaldi,
     Arc,
+    /// Obscura: lightweight Rust-based headless browser with CDP support.
+    /// No pixel rendering (screenshots unavailable), but fast and low-memory.
+    Obscura,
+    /// Lightpanda: lightweight Zig-based headless browser with CDP support.
+    /// No pixel rendering (screenshots unavailable), but fast and low-memory.
+    Lightpanda,
     Custom,
 }
 
@@ -102,8 +108,16 @@ impl BrowserKind {
             Self::Opera => "opera",
             Self::Vivaldi => "vivaldi",
             Self::Arc => "arc",
+            Self::Obscura => "obscura",
+            Self::Lightpanda => "lightpanda",
             Self::Custom => "custom",
         }
+    }
+
+    /// Returns `true` when this browser kind is known to lack pixel rendering
+    /// (and therefore cannot take screenshots).
+    pub fn supports_screenshots(self) -> bool {
+        !matches!(self, Self::Obscura | Self::Lightpanda)
     }
 }
 
@@ -126,6 +140,8 @@ pub enum BrowserPreference {
     Opera,
     Vivaldi,
     Arc,
+    Obscura,
+    Lightpanda,
 }
 
 impl BrowserPreference {
@@ -139,6 +155,8 @@ impl BrowserPreference {
             Self::Opera => Some(BrowserKind::Opera),
             Self::Vivaldi => Some(BrowserKind::Vivaldi),
             Self::Arc => Some(BrowserKind::Arc),
+            Self::Obscura => Some(BrowserKind::Obscura),
+            Self::Lightpanda => Some(BrowserKind::Lightpanda),
         }
     }
 }
@@ -406,6 +424,12 @@ pub struct BrowserConfig {
     pub enabled: bool,
     /// Path to Chrome/Chromium binary (auto-detected if not set).
     pub chrome_path: Option<String>,
+    /// Path to the Obscura binary (auto-detected from PATH if not set).
+    /// Obscura is a lightweight Rust-based headless browser that supports CDP.
+    pub obscura_path: Option<String>,
+    /// Path to the Lightpanda binary (auto-detected from PATH if not set).
+    /// Lightpanda is a lightweight Zig-based headless browser that supports CDP.
+    pub lightpanda_path: Option<String>,
     /// Whether to run in headless mode.
     pub headless: bool,
     /// Default viewport width.
@@ -449,10 +473,33 @@ pub struct BrowserConfig {
     /// Default: "127.0.0.1". Set to e.g. "host.docker.internal" when
     /// Moltis runs inside Docker alongside a sibling browser container.
     pub container_host: String,
+    /// Optional host-visible path for Moltis `data_dir()` when launching
+    /// browser sandbox containers from inside another container.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_data_dir: Option<PathBuf>,
+    /// Browserless API compatibility mode (`v1` or `v2`).
+    pub browserless_api_version: BrowserlessApiVersion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BrowserlessApiVersion {
+    #[default]
+    V1,
+    V2,
+}
+
+impl fmt::Display for BrowserlessApiVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::V1 => f.write_str("v1"),
+            Self::V2 => f.write_str("v2"),
+        }
+    }
 }
 
 fn default_sandbox_image() -> String {
-    "browserless/chrome".to_string()
+    "docker.io/browserless/chrome".to_string()
 }
 
 fn default_container_prefix() -> String {
@@ -464,6 +511,8 @@ impl Default for BrowserConfig {
         Self {
             enabled: true,
             chrome_path: None,
+            obscura_path: None,
+            lightpanda_path: None,
             headless: true,
             viewport_width: 2560,
             viewport_height: 1440,
@@ -481,6 +530,8 @@ impl Default for BrowserConfig {
             persist_profile: true,
             profile_dir: None,
             container_host: "127.0.0.1".to_string(),
+            host_data_dir: None,
+            browserless_api_version: BrowserlessApiVersion::V1,
         }
     }
 }
@@ -491,9 +542,9 @@ impl BrowserConfig {
     /// Returns `Some(path)` when either `profile_dir` is set or `persist_profile` is true.
     /// Returns `None` when profiles should be ephemeral.
     #[must_use]
-    pub fn resolved_profile_dir(&self) -> Option<std::path::PathBuf> {
+    pub fn resolved_profile_dir(&self) -> Option<PathBuf> {
         if let Some(ref dir) = self.profile_dir {
-            Some(std::path::PathBuf::from(dir))
+            Some(PathBuf::from(dir))
         } else if self.persist_profile {
             Some(moltis_config::data_dir().join("browser").join("profile"))
         } else {
@@ -507,6 +558,8 @@ impl From<&moltis_config::schema::BrowserConfig> for BrowserConfig {
         Self {
             enabled: cfg.enabled,
             chrome_path: cfg.chrome_path.clone(),
+            obscura_path: cfg.obscura_path.clone(),
+            lightpanda_path: cfg.lightpanda_path.clone(),
             headless: cfg.headless,
             viewport_width: cfg.viewport_width,
             viewport_height: cfg.viewport_height,
@@ -524,6 +577,11 @@ impl From<&moltis_config::schema::BrowserConfig> for BrowserConfig {
             persist_profile: cfg.persist_profile,
             profile_dir: cfg.profile_dir.clone(),
             container_host: cfg.container_host.clone(),
+            host_data_dir: None,
+            browserless_api_version: match cfg.browserless_api_version {
+                moltis_config::schema::BrowserlessApiVersion::V1 => BrowserlessApiVersion::V1,
+                moltis_config::schema::BrowserlessApiVersion::V2 => BrowserlessApiVersion::V2,
+            },
         }
     }
 }
@@ -617,6 +675,13 @@ mod tests {
     }
 
     #[test]
+    fn renderless_browsers_do_not_support_screenshots() {
+        assert!(!BrowserKind::Obscura.supports_screenshots());
+        assert!(!BrowserKind::Lightpanda.supports_screenshots());
+        assert!(BrowserKind::Chrome.supports_screenshots());
+    }
+
+    #[test]
     fn resolved_profile_dir_returns_path_by_default() {
         // Default config has persist_profile = true
         let config = BrowserConfig::default();
@@ -642,7 +707,7 @@ mod tests {
             ..BrowserConfig::default()
         };
         let dir = config.resolved_profile_dir();
-        assert_eq!(dir, Some(std::path::PathBuf::from("/custom/path")));
+        assert_eq!(dir, Some(PathBuf::from("/custom/path")));
     }
 
     #[test]

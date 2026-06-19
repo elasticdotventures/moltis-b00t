@@ -158,6 +158,16 @@ pub mod memory {
     pub const DOCUMENTS_COUNT: &str = "moltis_memory_documents_count";
     /// Total memory size in bytes
     pub const SIZE_BYTES: &str = "moltis_memory_size_bytes";
+    /// Total prefetch attempts (label: status=hit|miss|skip|error)
+    pub const PREFETCH_TOTAL: &str = "moltis_memory_prefetch_total";
+    /// Prefetch search duration in seconds
+    pub const PREFETCH_DURATION_SECONDS: &str = "moltis_memory_prefetch_duration_seconds";
+    /// Total silent memory turns (label: variant=compaction|periodic-extract|session-summary)
+    pub const SILENT_TURNS_TOTAL: &str = "moltis_memory_silent_turns_total";
+    /// Silent turn duration in seconds
+    pub const SILENT_TURN_DURATION_SECONDS: &str = "moltis_memory_silent_turn_duration_seconds";
+    /// Files written by silent memory turns
+    pub const SILENT_TURN_FILES_WRITTEN: &str = "moltis_memory_silent_turn_files_written";
 }
 
 /// Plugin metrics
@@ -401,6 +411,38 @@ pub mod protocol {
     pub const FRAME_RATE_EXCEEDED_TOTAL: &str = "moltis_protocol_frame_rate_exceeded_total";
 }
 
+/// External agent bridge metrics
+pub mod external_agents {
+    /// Transport availability probes by transport implementation
+    pub const TRANSPORT_AVAILABILITY_CHECKS_TOTAL: &str =
+        "moltis_external_agents_transport_availability_checks_total";
+    /// Duration of transport availability probes in seconds
+    pub const TRANSPORT_AVAILABILITY_DURATION_SECONDS: &str =
+        "moltis_external_agents_transport_availability_duration_seconds";
+    /// Session start attempts by agent kind and transport
+    pub const SESSION_STARTS_TOTAL: &str = "moltis_external_agents_session_starts_total";
+    /// Session start duration in seconds
+    pub const SESSION_START_DURATION_SECONDS: &str =
+        "moltis_external_agents_session_start_duration_seconds";
+    /// Session start failures by agent kind and transport
+    pub const SESSION_START_ERRORS_TOTAL: &str =
+        "moltis_external_agents_session_start_errors_total";
+    /// Prompt send attempts routed to external agents
+    pub const PROMPTS_TOTAL: &str = "moltis_external_agents_prompts_total";
+    /// Prompt send duration in seconds
+    pub const PROMPT_DURATION_SECONDS: &str = "moltis_external_agents_prompt_duration_seconds";
+    /// Prompt send failures
+    pub const PROMPT_ERRORS_TOTAL: &str = "moltis_external_agents_prompt_errors_total";
+    /// Session shutdown attempts
+    pub const SESSION_SHUTDOWNS_TOTAL: &str = "moltis_external_agents_session_shutdowns_total";
+    /// Session shutdown duration in seconds
+    pub const SESSION_SHUTDOWN_DURATION_SECONDS: &str =
+        "moltis_external_agents_session_shutdown_duration_seconds";
+    /// Session shutdown failures
+    pub const SESSION_SHUTDOWN_ERRORS_TOTAL: &str =
+        "moltis_external_agents_session_shutdown_errors_total";
+}
+
 /// Routing metrics
 pub mod routing {
     /// Route resolutions by binding level
@@ -438,6 +480,10 @@ pub mod skills {
     /// Prompt generation duration
     pub const PROMPT_GENERATION_DURATION_SECONDS: &str =
         "moltis_skills_prompt_generation_duration_seconds";
+    /// Skill activations (read_skill primary calls)
+    pub const ACTIVATIONS_TOTAL: &str = "moltis_skills_activations_total";
+    /// Skill modifications (create + update + patch)
+    pub const MODIFICATIONS_TOTAL: &str = "moltis_skills_modifications_total";
 }
 
 /// Telegram channel metrics
@@ -469,6 +515,28 @@ pub mod telegram {
     pub const OTP_VERIFICATIONS_TOTAL: &str = "moltis_telegram_otp_verifications_total";
 }
 
+/// Nostr DM channel metrics
+pub mod nostr {
+    /// DMs received from Nostr relays
+    pub const MESSAGES_RECEIVED_TOTAL: &str = "moltis_nostr_messages_received_total";
+    /// DMs sent to Nostr relays
+    pub const MESSAGES_SENT_TOTAL: &str = "moltis_nostr_messages_sent_total";
+    /// DM send duration in seconds
+    pub const MESSAGE_SEND_DURATION_SECONDS: &str = "moltis_nostr_message_send_duration_seconds";
+    /// DM send errors by type
+    pub const MESSAGE_SEND_ERRORS_TOTAL: &str = "moltis_nostr_message_send_errors_total";
+    /// Active Nostr accounts
+    pub const ACTIVE_ACCOUNTS: &str = "moltis_nostr_active_accounts";
+    /// Access control denials
+    pub const ACCESS_CONTROL_DENIALS_TOTAL: &str = "moltis_nostr_access_control_denials_total";
+    /// NIP-04/NIP-44 decryption failures
+    pub const DECRYPT_ERRORS_TOTAL: &str = "moltis_nostr_decrypt_errors_total";
+    /// Relay connection count (gauge-like, re-emitted on change)
+    pub const RELAYS_CONNECTED: &str = "moltis_nostr_relays_connected";
+    /// OTP challenges issued to non-allowlisted users
+    pub const OTP_CHALLENGES_TOTAL: &str = "moltis_nostr_otp_challenges_total";
+}
+
 /// Config loading metrics
 pub mod config {
     /// Config load duration in seconds
@@ -484,6 +552,18 @@ pub mod config {
     pub const RELOAD_DURATION_SECONDS: &str = "moltis_config_reload_duration_seconds";
     /// Validation errors by rule type
     pub const VALIDATION_ERRORS_TOTAL: &str = "moltis_config_validation_errors_total";
+}
+
+/// Spawn agent (sub-agent) metrics
+pub mod spawn {
+    /// Total sub-agents spawned (label: mode=blocking|nonblocking)
+    pub const SPAWNED_TOTAL: &str = "moltis_spawn_agents_spawned_total";
+    /// Sub-agent completions (label: status=completed|failed|cancelled)
+    pub const COMPLETED_TOTAL: &str = "moltis_spawn_agents_completed_total";
+    /// Number of currently running background (nonblocking) spawn tasks
+    pub const TASKS_IN_FLIGHT: &str = "moltis_spawn_agents_tasks_in_flight";
+    /// Expired tasks cleaned up from the store
+    pub const TASKS_EXPIRED_TOTAL: &str = "moltis_spawn_agents_tasks_expired_total";
 }
 
 /// Common/shared metrics
@@ -519,7 +599,26 @@ pub mod labels {
     pub const MODE: &str = "mode";
     pub const ACCOUNT_ID: &str = "account_id";
     pub const FILE_TYPE: &str = "file_type";
+    pub const KIND: &str = "kind";
     pub const REJECTION_REASON: &str = "rejection_reason";
+    pub const TRANSPORT: &str = "transport";
+    pub const VARIANT: &str = "variant";
+}
+
+/// Home Assistant integration metrics
+pub mod home_assistant {
+    /// Total number of HA REST API requests
+    pub const REST_REQUESTS_TOTAL: &str = "moltis_ha_rest_requests_total";
+    /// HA REST API request duration in seconds
+    pub const REST_REQUEST_DURATION_SECONDS: &str = "moltis_ha_rest_request_duration_seconds";
+    /// HA REST API errors
+    pub const REST_ERRORS_TOTAL: &str = "moltis_ha_rest_errors_total";
+    /// Total number of HA WebSocket connections
+    pub const WS_CONNECTIONS_TOTAL: &str = "moltis_ha_ws_connections_total";
+    /// Total number of HA WebSocket events received
+    pub const WS_EVENTS_RECEIVED_TOTAL: &str = "moltis_ha_ws_events_received_total";
+    /// HA WebSocket errors
+    pub const WS_ERRORS_TOTAL: &str = "moltis_ha_ws_errors_total";
 }
 
 /// Standard histogram buckets for different metric types

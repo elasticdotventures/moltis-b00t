@@ -50,6 +50,7 @@ unset CEREBRAS_API_KEY
 unset MINIMAX_API_KEY
 unset MOONSHOT_API_KEY
 unset VENICE_API_KEY
+unset NEARAI_API_KEY
 unset OLLAMA_API_KEY
 unset KIMI_API_KEY
 
@@ -92,5 +93,5 @@ fi
 if [ -n "${BINARY}" ]; then
 	exec "${BINARY}" --no-tls --bind 127.0.0.1 --port "${PORT}"
 else
-	exec cargo +nightly-2025-11-30 run --bin moltis -- --no-tls --bind 127.0.0.1 --port "${PORT}"
+	exec cargo run --bin moltis -- --no-tls --bind 127.0.0.1 --port "${PORT}"
 fi

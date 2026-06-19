@@ -20,16 +20,25 @@ use super::containers::{
 #[cfg(target_os = "macos")]
 use super::host::provision_packages;
 #[cfg(target_os = "macos")]
-use super::paths::ensure_sandbox_home_persistence_host_dir;
+use super::paths::{
+    ensure_sandbox_home_persistence_host_dir, resolve_home_persistence_guest_path_on_host,
+    resolve_workspace_guest_path_on_host,
+};
 #[cfg(target_os = "macos")]
 use super::types::{
     BuildImageResult, DEFAULT_SANDBOX_IMAGE, NetworkPolicy, SANDBOX_HOME_DIR, Sandbox,
-    SandboxConfig, SandboxId, canonical_sandbox_packages, truncate_output_for_display,
+    SandboxConfig, SandboxId, canonical_sandbox_packages, tail_lines, truncate_output_for_display,
 };
 #[cfg(target_os = "macos")]
 use crate::error::{Error, Result};
 #[cfg(target_os = "macos")]
 use crate::exec::{ExecOpts, ExecResult};
+#[cfg(target_os = "macos")]
+use crate::sandbox::file_system::{
+    SandboxListFilesResult, SandboxReadResult, command_list_files, command_read_file,
+    command_write_file, native_host_list_files, native_host_read_file, native_host_write_file,
+    remap_host_list_result_to_guest,
+};
 
 /// Apple Container sandbox using the `container` CLI (macOS 26+, Apple Silicon).
 #[cfg(target_os = "macos")]
@@ -157,6 +166,20 @@ impl AppleContainerSandbox {
             return Ok(None);
         };
         Ok(Some(format!("{}:{SANDBOX_HOME_DIR}", host_dir.display())))
+    }
+
+    fn mounted_host_path(&self, id: &SandboxId, guest_path: &str) -> Option<std::path::PathBuf> {
+        let guest_path = std::path::Path::new(guest_path);
+        resolve_workspace_guest_path_on_host(&self.config, Some("container"), guest_path).or_else(
+            || {
+                resolve_home_persistence_guest_path_on_host(
+                    &self.config,
+                    Some("container"),
+                    id,
+                    guest_path,
+                )
+            },
+        )
     }
 
     async fn resolve_local_image(&self, requested_image: &str) -> Result<String> {
@@ -687,6 +710,10 @@ impl Sandbox for AppleContainerSandbox {
         "apple-container"
     }
 
+    fn provides_fs_isolation(&self) -> bool {
+        true
+    }
+
     async fn ensure_ready(&self, id: &SandboxId, image_override: Option<&str>) -> Result<()> {
         let mut name = self.container_name(id).await;
         let requested_image = image_override.unwrap_or_else(|| self.image());
@@ -1043,6 +1070,58 @@ impl Sandbox for AppleContainerSandbox {
         }
     }
 
+    async fn read_file(
+        &self,
+        id: &SandboxId,
+        file_path: &str,
+        max_bytes: u64,
+    ) -> Result<SandboxReadResult> {
+        if let Some(host_path) = self.mounted_host_path(id, file_path) {
+            return native_host_read_file(
+                host_path
+                    .to_str()
+                    .ok_or_else(|| Error::message("mounted host path contains invalid UTF-8"))?,
+                max_bytes,
+            )
+            .await;
+        }
+
+        command_read_file(self, id, file_path, max_bytes).await
+    }
+
+    async fn write_file(
+        &self,
+        id: &SandboxId,
+        file_path: &str,
+        content: &[u8],
+    ) -> Result<Option<serde_json::Value>> {
+        if let Some(host_path) = self.mounted_host_path(id, file_path) {
+            return native_host_write_file(
+                host_path
+                    .to_str()
+                    .ok_or_else(|| Error::message("mounted host path contains invalid UTF-8"))?,
+                content,
+            )
+            .await;
+        }
+
+        command_write_file(self, id, file_path, content).await
+    }
+
+    async fn list_files(&self, id: &SandboxId, root: &str) -> Result<SandboxListFilesResult> {
+        if let Some(host_path) = self.mounted_host_path(id, root) {
+            let host_files = native_host_list_files(
+                host_path
+                    .to_str()
+                    .ok_or_else(|| Error::message("mounted host path contains invalid UTF-8"))?,
+            )
+            .await?;
+            return remap_host_list_result_to_guest(root, &host_path, host_files);
+        }
+
+        command_list_files(self, id, root).await
+    }
+
     async fn build_image(
         &self,
         base: &str,
@@ -1055,7 +1134,7 @@ impl Sandbox for AppleContainerSandbox {
         let tag = sandbox_image_tag(self.image_repo(), base, packages);
 
         if sandbox_image_exists("container", &tag).await {
-            info!(
+            debug!(
                 tag,
                 "pre-built sandbox image already exists, skipping build"
             );
@@ -1086,6 +1165,7 @@ impl Sandbox for AppleContainerSandbox {
 
         let output = output?;
         if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("XPC connection error") || stderr.contains("Connection invalid") {
                 return Err(Error::message(
@@ -1093,9 +1173,19 @@ impl Sandbox for AppleContainerSandbox {
                      Start it with `container system start` and restart moltis",
                 ));
             }
+            debug!(
+                tag,
+                stdout = %tail_lines(&stdout, 20),
+                stderr = %tail_lines(&stderr, 20),
+                "container build failed"
+            );
+            let status = output.status.code().map_or_else(
+                || output.status.to_string(),
+                |code| format!("exit code {code}"),
+            );
             return Err(Error::message(format!(
                 "container build failed for {tag}: {}",
-                stderr.trim()
+                status
             )));
         }
 

@@ -13,14 +13,20 @@ use {
     axum_extra::extract::Host,
 };
 
-use moltis_gateway::{
-    auth::CredentialStore, auth_webauthn::SharedWebAuthnRegistry, state::GatewayState,
+use {
+    moltis_auth::locality::is_local_connection,
+    moltis_gateway::{
+        auth::CredentialStore, auth_webauthn::SharedWebAuthnRegistry, state::GatewayState,
+    },
 };
 
 use crate::{
     auth_middleware::{AuthResult, AuthSession, SESSION_COOKIE, check_auth},
-    server::is_local_connection,
+    login_guard::LoginGuard,
 };
+
+#[cfg(feature = "vault")]
+use crate::auth_routes::vault::{run_vault_env_migration, start_stored_channels_on_vault_unseal};
 
 /// Auth-related application state.
 #[derive(Clone)]
@@ -28,6 +34,7 @@ pub struct AuthState {
     pub credential_store: Arc<CredentialStore>,
     pub webauthn_registry: Option<SharedWebAuthnRegistry>,
     pub gateway_state: Arc<GatewayState>,
+    pub login_guard: LoginGuard,
 }
 
 impl axum::extract::FromRef<AuthState> for Arc<CredentialStore> {
@@ -87,14 +94,47 @@ pub fn auth_router() -> axum::Router<AuthState> {
 #[cfg(feature = "vault")]
 fn vault_routes() -> axum::Router<AuthState> {
     axum::Router::new()
-        .route("/vault/status", get(vault_status_handler))
-        .route("/vault/unlock", post(vault_unlock_handler))
-        .route("/vault/recovery", post(vault_recovery_handler))
+        .route("/vault/status", get(vault::vault_status_handler))
+        .route("/vault/initialize", post(vault::vault_initialize_handler))
+        .route("/vault/unlock", post(vault::vault_unlock_handler))
+        .route("/vault/recovery", post(vault::vault_recovery_handler))
+        .route("/vault/disable", post(vault::vault_disable_handler))
 }
 
 #[cfg(not(feature = "vault"))]
 fn vault_routes() -> axum::Router<AuthState> {
     axum::Router::new()
+}
+
+// ── Brute-force block response ────────────────────────────────────────────────
+
+fn blocked_response(reason: crate::login_guard::BlockReason) -> axum::response::Response {
+    use crate::login_guard::BlockReason;
+    let (message, retry_after) = match reason {
+        BlockReason::IpBanned { retry_after } => (
+            "too many failed attempts from this address — try again later",
+            retry_after,
+        ),
+        BlockReason::AccountLocked { retry_after } => (
+            "account temporarily locked due to suspicious activity — try again later",
+            retry_after,
+        ),
+    };
+    let retry_secs = retry_after.as_secs().max(1);
+    let mut resp = (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(serde_json::json!({
+            "code": "LOGIN_BLOCKED",
+            "error": message,
+            "retry_after_seconds": retry_secs,
+        })),
+    )
+        .into_response();
+    if let Ok(val) = retry_secs.to_string().parse() {
+        resp.headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, val);
+    }
+    resp
 }
 
 // ── Status ───────────────────────────────────────────────────────────────────
@@ -173,17 +213,41 @@ async fn setup_handler(
         return (StatusCode::FORBIDDEN, "setup already completed").into_response();
     }
 
+    let client_ip = crate::request_throttle::resolve_client_ip(
+        &headers,
+        addr,
+        state.gateway_state.behind_proxy,
+    );
+    const SETUP_ACCOUNT: &str = "__setup__";
+
+    if let Some(block) = state.login_guard.check(client_ip, SETUP_ACCOUNT) {
+        return blocked_response(block);
+    }
+
     // Validate setup code if one was generated at startup.
     {
         let inner = state.gateway_state.inner.read().await;
-        if let Some(ref expected) = inner.setup_code
-            && body.setup_code.as_deref() != Some(expected.expose_secret().as_str())
-        {
-            return (StatusCode::FORBIDDEN, "invalid or missing setup code").into_response();
+        if let Some(ref expected) = inner.setup_code {
+            // Expire setup code after 30 minutes.
+            if let Some(created_at) = inner.setup_code_created_at
+                && created_at.elapsed() > std::time::Duration::from_secs(30 * 60)
+            {
+                return (
+                    StatusCode::GONE,
+                    "setup code has expired — restart the server to generate a new one",
+                )
+                    .into_response();
+            }
+            if body.setup_code.as_deref() != Some(expected.expose_secret().as_str()) {
+                state.login_guard.record_failure(client_ip, SETUP_ACCOUNT);
+                return (StatusCode::FORBIDDEN, "invalid or missing setup code").into_response();
+            }
         }
     }
 
     let password = body.password.unwrap_or_default();
+    #[cfg(feature = "vault")]
+    let mut vault_recovery_key = None;
 
     let is_local = is_local_connection(&headers, addr, state.gateway_state.behind_proxy);
     if password.is_empty() && is_local {
@@ -196,13 +260,55 @@ async fn setup_handler(
                 .into_response();
         }
     } else {
-        if password.len() < 8 {
+        if password.len() < 12 {
             return (
                 StatusCode::BAD_REQUEST,
-                "password must be at least 8 characters",
+                "password must be at least 12 characters",
             )
                 .into_response();
         }
+        #[cfg(feature = "vault")]
+        if state.gateway_state.vault.is_some() {
+            match state
+                .credential_store
+                .set_initial_password_and_prepare_vault(&password)
+                .await
+            {
+                Ok(recovery_key) => {
+                    vault_recovery_key = recovery_key.map(|key| key.phrase().to_owned());
+                    run_vault_env_migration(&state).await;
+                    start_stored_channels_on_vault_unseal(&state).await;
+                },
+                Err(moltis_gateway::auth::PasswordVaultChangeError::VaultBadCredential) => {
+                    return (
+                        StatusCode::LOCKED,
+                        "password must match the existing vault password; unlock with recovery key before setting a different password",
+                    )
+                    .into_response();
+                },
+                Err(moltis_gateway::auth::PasswordVaultChangeError::VaultStateChanged) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        "vault state changed while setting password; retry the setup",
+                    )
+                        .into_response();
+                },
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+                },
+            }
+        }
+        #[cfg(feature = "vault")]
+        if state.gateway_state.vault.is_none()
+            && let Err(e) = state.credential_store.set_initial_password(&password).await
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to set password: {e}"),
+            )
+                .into_response();
+        }
+        #[cfg(not(feature = "vault"))]
         if let Err(e) = state.credential_store.set_initial_password(&password).await {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -211,32 +317,6 @@ async fn setup_handler(
                 .into_response();
         }
     }
-
-    // Initialize the vault when a password was set.
-    #[cfg(feature = "vault")]
-    let vault_recovery_key = if !password.is_empty() {
-        if let Some(ref vault) = state.gateway_state.vault {
-            match vault.initialize(&password).await {
-                Ok(rk) => {
-                    tracing::info!("vault initialized");
-                    run_vault_env_migration(&state).await;
-                    Some(rk.phrase().to_owned())
-                },
-                Err(moltis_vault::VaultError::AlreadyInitialized) => {
-                    tracing::debug!("vault already initialized, skipping");
-                    None
-                },
-                Err(e) => {
-                    tracing::warn!(error = %e, "vault initialization failed");
-                    None
-                },
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
 
     // Disconnect pre-setup WebSocket clients and clear setup code.
     state
@@ -247,7 +327,7 @@ async fn setup_handler(
     match state.credential_store.create_session().await {
         Ok(token) => {
             let bp = state.gateway_state.behind_proxy;
-            let secure = state.gateway_state.is_secure();
+            let secure = should_secure_cookie(state.gateway_state.tls_active, bp, &headers);
             #[cfg(feature = "vault")]
             if let Some(rk) = vault_recovery_key {
                 let domain_attr = localhost_cookie_domain(&headers, bp);
@@ -285,11 +365,29 @@ struct LoginRequest {
 
 async fn login_handler(
     State(state): State<AuthState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> impl IntoResponse {
+    let client_ip = crate::request_throttle::resolve_client_ip(
+        &headers,
+        addr,
+        state.gateway_state.behind_proxy,
+    );
+    const PASSWORD_ACCOUNT: &str = "__password__";
+
+    if let Some(block) = state.login_guard.check(client_ip, PASSWORD_ACCOUNT) {
+        return blocked_response(block);
+    }
+
+    let ip_str = client_ip.to_string();
     match state.credential_store.verify_password(&body.password).await {
         Ok(true) => {
+            state.login_guard.record_success(client_ip);
+            state
+                .credential_store
+                .audit_log("login_success", Some(&ip_str), None)
+                .await;
             // Best-effort vault unseal on successful login.
             #[cfg(feature = "vault")]
             if let Some(ref vault) = state.gateway_state.vault {
@@ -297,6 +395,7 @@ async fn login_handler(
                     Ok(()) => {
                         tracing::info!("vault unsealed on login");
                         run_vault_env_migration(&state).await;
+                        start_stored_channels_on_vault_unseal(&state).await;
                     },
                     Err(e) => {
                         tracing::debug!(error = %e, "vault unseal on login skipped");
@@ -306,7 +405,8 @@ async fn login_handler(
             match state.credential_store.create_session().await {
                 Ok(token) => {
                     let bp = state.gateway_state.behind_proxy;
-                    session_response(token, &headers, bp, state.gateway_state.is_secure())
+                    let secure = should_secure_cookie(state.gateway_state.tls_active, bp, &headers);
+                    session_response(token, &headers, bp, secure)
                 },
                 Err(e) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -315,7 +415,16 @@ async fn login_handler(
                     .into_response(),
             }
         },
-        Ok(false) => (StatusCode::UNAUTHORIZED, "invalid password").into_response(),
+        Ok(false) => {
+            state
+                .login_guard
+                .record_failure(client_ip, PASSWORD_ACCOUNT);
+            state
+                .credential_store
+                .audit_log("login_failure", Some(&ip_str), None)
+                .await;
+            (StatusCode::UNAUTHORIZED, "invalid password").into_response()
+        },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("auth error: {e}"),
@@ -334,7 +443,8 @@ async fn logout_handler(
         let _ = state.credential_store.delete_session(token).await;
     }
     let bp = state.gateway_state.behind_proxy;
-    clear_session_response(&headers, bp, state.gateway_state.is_secure())
+    let secure = should_secure_cookie(state.gateway_state.tls_active, bp, &headers);
+    clear_session_response(&headers, bp, secure)
 }
 
 // ── Reset all auth (requires session) ─────────────────────────────────────────
@@ -353,9 +463,14 @@ async fn reset_auth_handler(
                 .await;
             let code = moltis_gateway::auth::generate_setup_code();
             tracing::info!("setup code: {code} (enter this in the browser to set your password)");
-            state.gateway_state.inner.write().await.setup_code = Some(secrecy::Secret::new(code));
+            {
+                let mut inner = state.gateway_state.inner.write().await;
+                inner.setup_code = Some(secrecy::Secret::new(code));
+                inner.setup_code_created_at = Some(std::time::Instant::now());
+            }
             let bp = state.gateway_state.behind_proxy;
-            clear_session_response(&headers, bp, state.gateway_state.tls_active || bp)
+            let secure = should_secure_cookie(state.gateway_state.tls_active, bp, &headers);
+            clear_session_response(&headers, bp, secure)
         },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -372,12 +487,14 @@ struct ChangePasswordRequest {
 async fn change_password_handler(
     _session: AuthSession,
     State(state): State<AuthState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<ChangePasswordRequest>,
 ) -> impl IntoResponse {
-    if body.new_password.len() < 8 {
+    if body.new_password.len() < 12 {
         return (
             StatusCode::BAD_REQUEST,
-            "new password must be at least 8 characters",
+            "new password must be at least 12 characters",
         )
             .into_response();
     }
@@ -385,6 +502,48 @@ async fn change_password_handler(
     let has_password = state.credential_store.has_password().await.unwrap_or(false);
 
     if !has_password {
+        #[cfg(feature = "vault")]
+        if state.gateway_state.vault.is_some() {
+            return match state
+                .credential_store
+                .add_password_and_prepare_vault(&body.new_password)
+                .await
+            {
+                Ok(recovery_key) => {
+                    run_vault_env_migration(&state).await;
+                    start_stored_channels_on_vault_unseal(&state).await;
+                    state
+                        .gateway_state
+                        .disconnect_all_clients("password_changed")
+                        .await;
+                    if let Some(rk) = recovery_key {
+                        return Json(
+                            serde_json::json!({ "ok": true, "recovery_key": rk.phrase() }),
+                        )
+                        .into_response();
+                    }
+                    Json(serde_json::json!({ "ok": true })).into_response()
+                },
+                Err(moltis_gateway::auth::PasswordVaultChangeError::VaultBadCredential) => {
+                    (
+                        StatusCode::LOCKED,
+                        "password must match the existing vault password; unlock with recovery key before setting a different password",
+                    )
+                    .into_response()
+                },
+                Err(moltis_gateway::auth::PasswordVaultChangeError::VaultStateChanged) => {
+                    (
+                        StatusCode::CONFLICT,
+                        "vault state changed while setting password; retry the password change",
+                    )
+                    .into_response()
+                },
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+                },
+            };
+        }
+
         // No password set yet — add one (works even after passkey-only setup).
         return match state
             .credential_store
@@ -392,61 +551,76 @@ async fn change_password_handler(
             .await
         {
             Ok(()) => {
-                // Initialize the vault now that we have a password.
-                #[cfg(feature = "vault")]
-                let vault_recovery_key = if let Some(ref vault) = state.gateway_state.vault {
-                    match vault.initialize(&body.new_password).await {
-                        Ok(rk) => {
-                            tracing::info!("vault initialized on first password set");
-                            run_vault_env_migration(&state).await;
-                            Some(rk.phrase().to_owned())
-                        },
-                        Err(moltis_vault::VaultError::AlreadyInitialized) => {
-                            tracing::debug!("vault already initialized, unsealing");
-                            let _ = vault.unseal(&body.new_password).await;
-                            None
-                        },
-                        Err(e) => {
-                            tracing::warn!(error = %e, "vault initialization failed");
-                            None
-                        },
-                    }
-                } else {
-                    None
-                };
                 state
                     .gateway_state
                     .disconnect_all_clients("password_changed")
                     .await;
-                #[cfg(feature = "vault")]
-                if let Some(rk) = vault_recovery_key {
-                    return Json(serde_json::json!({ "ok": true, "recovery_key": rk }))
-                        .into_response();
-                }
                 Json(serde_json::json!({ "ok": true })).into_response()
             },
             Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         };
     }
 
+    let client_ip = crate::request_throttle::resolve_client_ip(
+        &headers,
+        addr,
+        state.gateway_state.behind_proxy,
+    );
+    const PASSWORD_CHANGE_ACCOUNT: &str = "__password_change__";
+
+    if let Some(block) = state.login_guard.check(client_ip, PASSWORD_CHANGE_ACCOUNT) {
+        return blocked_response(block);
+    }
+
     let current_password = body.current_password.unwrap_or_default();
+    #[cfg(feature = "vault")]
+    if state.gateway_state.vault.is_some() {
+        return match state
+            .credential_store
+            .change_password_and_rotate_vault(&current_password, &body.new_password)
+            .await
+        {
+            Ok(()) => {
+                state.login_guard.record_success(client_ip);
+                run_vault_env_migration(&state).await;
+                start_stored_channels_on_vault_unseal(&state).await;
+                state
+                    .gateway_state
+                    .disconnect_all_clients("password_changed")
+                    .await;
+                Json(serde_json::json!({ "ok": true })).into_response()
+            },
+            Err(moltis_gateway::auth::PasswordVaultChangeError::IncorrectCurrentPassword) => {
+                state
+                    .login_guard
+                    .record_failure(client_ip, PASSWORD_CHANGE_ACCOUNT);
+                (StatusCode::FORBIDDEN, "current password is incorrect").into_response()
+            },
+            Err(moltis_gateway::auth::PasswordVaultChangeError::VaultBadCredential) => {
+                (
+                    StatusCode::LOCKED,
+                    "vault password does not match current password; unlock with recovery key before changing password",
+                )
+                    .into_response()
+            },
+            Err(moltis_gateway::auth::PasswordVaultChangeError::VaultStateChanged) => {
+                (
+                    StatusCode::CONFLICT,
+                    "vault state changed while changing password; retry the password change",
+                )
+                    .into_response()
+            },
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        };
+    }
+
     match state
         .credential_store
         .change_password(&current_password, &body.new_password)
         .await
     {
         Ok(()) => {
-            // Best-effort vault password rotation.
-            #[cfg(feature = "vault")]
-            if let Some(ref vault) = state.gateway_state.vault {
-                match vault
-                    .change_password(&current_password, &body.new_password)
-                    .await
-                {
-                    Ok(()) => tracing::info!("vault password rotated"),
-                    Err(e) => tracing::warn!(error = %e, "vault password rotation failed"),
-                }
-            }
+            state.login_guard.record_success(client_ip);
             state
                 .gateway_state
                 .disconnect_all_clients("password_changed")
@@ -456,6 +630,9 @@ async fn change_password_handler(
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("incorrect") {
+                state
+                    .login_guard
+                    .record_failure(client_ip, PASSWORD_CHANGE_ACCOUNT);
                 (StatusCode::FORBIDDEN, msg).into_response()
             } else {
                 (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
@@ -507,7 +684,17 @@ async fn create_api_key_handler(
         .create_api_key(body.label.trim(), body.scopes.as_deref())
         .await
     {
-        Ok((id, key)) => Json(serde_json::json!({ "id": id, "key": key })).into_response(),
+        Ok((id, key)) => {
+            state
+                .credential_store
+                .audit_log(
+                    "key_created",
+                    None,
+                    Some(&format!("id={id}, label={}", body.label.trim())),
+                )
+                .await;
+            Json(serde_json::json!({ "id": id, "key": key })).into_response()
+        },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -518,7 +705,13 @@ async fn revoke_api_key_handler(
     axum::extract::Path(id): axum::extract::Path<i64>,
 ) -> impl IntoResponse {
     match state.credential_store.revoke_api_key(id).await {
-        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Ok(()) => {
+            state
+                .credential_store
+                .audit_log("key_revoked", None, Some(&format!("id={id}")))
+                .await;
+            Json(serde_json::json!({ "ok": true })).into_response()
+        },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -579,6 +772,35 @@ async fn rename_passkey_handler(
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Whether the session cookie should include the `Secure` attribute.
+///
+/// - TLS active on the gateway listener → always secure.
+/// - Behind a reverse proxy → secure only when the proxy reports HTTPS via
+///   `X-Forwarded-Proto`.  This avoids setting `Secure` on cookies when the
+///   proxy-to-client leg is plain HTTP (e.g. LAN Docker setups).
+/// - Neither → not secure (plain HTTP direct connection).
+fn should_secure_cookie(
+    tls_active: bool,
+    behind_proxy: bool,
+    headers: &axum::http::HeaderMap,
+) -> bool {
+    if tls_active {
+        return true;
+    }
+    if behind_proxy {
+        return headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|proto| {
+                // Take only the first value in case of a comma-separated list
+                // (e.g. "https, http" from a multi-hop proxy chain).
+                let first = proto.split(',').next().unwrap_or("").trim();
+                first.eq_ignore_ascii_case("https")
+            });
+    }
+    false
+}
 
 /// Build a session cookie string, adding `Domain=localhost` when the request
 /// arrived on a `.localhost` subdomain (e.g. `moltis.localhost`) so the cookie
@@ -802,10 +1024,22 @@ struct PasskeyAuthFinishRequest {
 
 async fn passkey_auth_finish_handler(
     State(state): State<AuthState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Host(host): Host,
     headers: axum::http::HeaderMap,
     Json(body): Json<PasskeyAuthFinishRequest>,
 ) -> impl IntoResponse {
+    let client_ip = crate::request_throttle::resolve_client_ip(
+        &headers,
+        addr,
+        state.gateway_state.behind_proxy,
+    );
+    const PASSKEY_ACCOUNT: &str = "__passkey__";
+
+    if let Some(block) = state.login_guard.check(client_ip, PASSKEY_ACCOUNT) {
+        return blocked_response(block);
+    }
+
     let Some(ref registry) = state.webauthn_registry else {
         return (StatusCode::NOT_IMPLEMENTED, "passkeys not configured").into_response();
     };
@@ -818,14 +1052,21 @@ async fn passkey_auth_finish_handler(
     };
 
     match wa.finish_authentication(&body.challenge_id, &body.credential) {
-        Ok(_result) => match state.credential_store.create_session().await {
-            Ok(token) => {
-                let bp = state.gateway_state.behind_proxy;
-                session_response(token, &headers, bp, state.gateway_state.tls_active || bp)
-            },
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(_result) => {
+            state.login_guard.record_success(client_ip);
+            match state.credential_store.create_session().await {
+                Ok(token) => {
+                    let bp = state.gateway_state.behind_proxy;
+                    let secure = should_secure_cookie(state.gateway_state.tls_active, bp, &headers);
+                    session_response(token, &headers, bp, secure)
+                },
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            }
         },
-        Err(e) => (StatusCode::UNAUTHORIZED, e.to_string()).into_response(),
+        Err(e) => {
+            state.login_guard.record_failure(client_ip, PASSKEY_ACCOUNT);
+            (StatusCode::UNAUTHORIZED, e.to_string()).into_response()
+        },
     }
 }
 
@@ -966,7 +1207,8 @@ async fn setup_passkey_register_finish_handler(
     match state.credential_store.create_session().await {
         Ok(token) => {
             let bp = state.gateway_state.behind_proxy;
-            session_response(token, &headers, bp, state.gateway_state.tls_active || bp)
+            let secure = should_secure_cookie(state.gateway_state.tls_active, bp, &headers);
+            session_response(token, &headers, bp, secure)
         },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -992,279 +1234,4 @@ fn extract_session_token(headers: &axum::http::HeaderMap) -> Option<&str> {
     crate::auth_middleware::parse_cookie(cookie_header, SESSION_COOKIE)
 }
 
-// ── Vault handlers ──────────────────────────────────────────────────────────
-
-#[cfg(feature = "vault")]
-async fn vault_status_handler(State(state): State<AuthState>) -> impl IntoResponse {
-    let status = if let Some(ref vault) = state.gateway_state.vault {
-        match vault.status().await {
-            Ok(s) => format!("{s:?}").to_lowercase(),
-            Err(_) => "error".to_owned(),
-        }
-    } else {
-        "disabled".to_owned()
-    };
-    Json(serde_json::json!({ "status": status }))
-}
-
-#[cfg(feature = "vault")]
-#[derive(serde::Deserialize)]
-struct VaultUnlockRequest {
-    password: String,
-}
-
-#[cfg(feature = "vault")]
-async fn vault_unlock_handler(
-    State(state): State<AuthState>,
-    Json(body): Json<VaultUnlockRequest>,
-) -> impl IntoResponse {
-    let Some(ref vault) = state.gateway_state.vault else {
-        return (StatusCode::NOT_FOUND, "vault not available").into_response();
-    };
-    match vault.unseal(&body.password).await {
-        Ok(()) => {
-            run_vault_env_migration(&state).await;
-            Json(serde_json::json!({ "ok": true })).into_response()
-        },
-        Err(moltis_vault::VaultError::BadCredential) => {
-            (StatusCode::LOCKED, "invalid password").into_response()
-        },
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
-#[cfg(feature = "vault")]
-#[derive(serde::Deserialize)]
-struct VaultRecoveryRequest {
-    recovery_key: String,
-}
-
-#[cfg(feature = "vault")]
-async fn vault_recovery_handler(
-    State(state): State<AuthState>,
-    Json(body): Json<VaultRecoveryRequest>,
-) -> impl IntoResponse {
-    let Some(ref vault) = state.gateway_state.vault else {
-        return (StatusCode::NOT_FOUND, "vault not available").into_response();
-    };
-    match vault.unseal_with_recovery(&body.recovery_key).await {
-        Ok(()) => {
-            run_vault_env_migration(&state).await;
-            Json(serde_json::json!({ "ok": true })).into_response()
-        },
-        Err(moltis_vault::VaultError::BadCredential) => {
-            (StatusCode::LOCKED, "invalid recovery key").into_response()
-        },
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
-/// Migrate plaintext secrets to encrypted storage after vault unseal.
-#[cfg(feature = "vault")]
-async fn run_vault_env_migration(state: &AuthState) {
-    if let Some(vault) = state.credential_store.vault() {
-        let pool = state.credential_store.db_pool();
-        match moltis_vault::migration::migrate_env_vars(vault, pool).await {
-            Ok(n) if n > 0 => {
-                tracing::info!(count = n, "migrated env vars to encrypted");
-            },
-            Ok(_) => {},
-            Err(e) => {
-                tracing::warn!(error = %e, "env var migration failed");
-            },
-        }
-        match moltis_vault::migration::migrate_ssh_keys(vault, pool).await {
-            Ok(n) if n > 0 => {
-                tracing::info!(count = n, "migrated ssh keys to encrypted");
-            },
-            Ok(_) => {},
-            Err(e) => {
-                tracing::warn!(error = %e, "ssh key migration failed");
-            },
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-    use super::*;
-
-    fn headers_with_host(host: &str) -> axum::http::HeaderMap {
-        let mut h = axum::http::HeaderMap::new();
-        h.insert(
-            axum::http::header::HOST,
-            host.parse().expect("valid host header"),
-        );
-        h
-    }
-
-    #[test]
-    fn localhost_cookie_domain_plain_localhost() {
-        let h = headers_with_host("localhost:8080");
-        assert_eq!(localhost_cookie_domain(&h, false), "; Domain=localhost");
-    }
-
-    #[test]
-    fn localhost_cookie_domain_moltis_subdomain() {
-        let h = headers_with_host("moltis.localhost:59263");
-        assert_eq!(localhost_cookie_domain(&h, false), "; Domain=localhost");
-    }
-
-    #[test]
-    fn localhost_cookie_domain_bare_localhost_no_port() {
-        let h = headers_with_host("localhost");
-        assert_eq!(localhost_cookie_domain(&h, false), "; Domain=localhost");
-    }
-
-    #[test]
-    fn localhost_cookie_domain_external_host_omits_domain() {
-        let h = headers_with_host("example.com:443");
-        assert_eq!(localhost_cookie_domain(&h, false), "");
-    }
-
-    #[test]
-    fn localhost_cookie_domain_tailscale_host_omits_domain() {
-        let h = headers_with_host("mybox.tail12345.ts.net:8080");
-        assert_eq!(localhost_cookie_domain(&h, false), "");
-    }
-
-    #[test]
-    fn localhost_cookie_domain_ip_address_omits_domain() {
-        let h = headers_with_host("192.168.1.100:8080");
-        assert_eq!(localhost_cookie_domain(&h, false), "");
-    }
-
-    #[test]
-    fn localhost_cookie_domain_no_host_header_omits_domain() {
-        let h = axum::http::HeaderMap::new();
-        assert_eq!(localhost_cookie_domain(&h, false), "");
-    }
-
-    #[test]
-    fn localhost_cookie_domain_proxy_mode_ignores_upstream_localhost_host() {
-        let h = headers_with_host("localhost:13131");
-        assert_eq!(localhost_cookie_domain(&h, true), "");
-    }
-
-    #[test]
-    fn localhost_cookie_domain_proxy_mode_uses_forwarded_host() {
-        let mut h = headers_with_host("localhost:13131");
-        h.insert("x-forwarded-host", "chat.example.com".parse().unwrap());
-        assert_eq!(localhost_cookie_domain(&h, true), "");
-    }
-
-    #[test]
-    fn localhost_cookie_domain_proxy_mode_supports_forwarded_localhost_subdomain() {
-        let mut h = headers_with_host("localhost:13131");
-        h.insert("x-forwarded-host", "moltis.localhost:8080".parse().unwrap());
-        assert_eq!(localhost_cookie_domain(&h, true), "; Domain=localhost");
-    }
-
-    #[test]
-    fn session_response_includes_domain_for_localhost() {
-        let h = headers_with_host("moltis.localhost:8080");
-        let resp = session_response("test-token".into(), &h, false, false);
-        let cookie = resp
-            .headers()
-            .get(axum::http::header::SET_COOKIE)
-            .expect("login response must set a session cookie")
-            .to_str()
-            .expect("cookie header must be valid UTF-8");
-        assert!(
-            cookie.contains("; Domain=localhost"),
-            "cookie should include Domain=localhost for .localhost host, got: {cookie}"
-        );
-        assert!(cookie.contains("moltis_session=test-token"));
-        assert!(
-            !cookie.contains("; Secure"),
-            "cookie should NOT include Secure when not using TLS, got: {cookie}"
-        );
-    }
-
-    #[test]
-    fn session_response_omits_domain_for_external_host() {
-        let h = headers_with_host("example.com:443");
-        let resp = session_response("test-token".into(), &h, false, false);
-        let cookie = resp
-            .headers()
-            .get(axum::http::header::SET_COOKIE)
-            .expect("login response must set a session cookie")
-            .to_str()
-            .expect("cookie header must be valid UTF-8");
-        assert!(
-            !cookie.contains("Domain="),
-            "cookie should NOT include Domain for external host, got: {cookie}"
-        );
-    }
-
-    #[test]
-    fn session_response_includes_secure_when_tls_active() {
-        let h = headers_with_host("localhost:8443");
-        let resp = session_response("test-token".into(), &h, false, true);
-        let cookie = resp
-            .headers()
-            .get(axum::http::header::SET_COOKIE)
-            .expect("login response must set a session cookie")
-            .to_str()
-            .expect("cookie header must be valid UTF-8");
-        assert!(
-            cookie.contains("; Secure"),
-            "cookie should include Secure when TLS is active, got: {cookie}"
-        );
-    }
-
-    #[test]
-    fn clear_session_response_includes_secure_when_tls_active() {
-        let h = headers_with_host("localhost:8443");
-        let resp = clear_session_response(&h, false, true);
-        let cookie = resp
-            .headers()
-            .get(axum::http::header::SET_COOKIE)
-            .expect("clear response must set a session cookie")
-            .to_str()
-            .expect("cookie header must be valid UTF-8");
-        assert!(
-            cookie.contains("; Secure"),
-            "clear cookie should include Secure when TLS is active, got: {cookie}"
-        );
-        assert!(cookie.contains("Max-Age=0"));
-    }
-
-    #[test]
-    fn clear_session_response_includes_domain_for_localhost() {
-        let h = headers_with_host("localhost:18080");
-        let resp = clear_session_response(&h, false, false);
-        let cookie = resp
-            .headers()
-            .get(axum::http::header::SET_COOKIE)
-            .expect("clear response must set a session cookie")
-            .to_str()
-            .expect("cookie header must be valid UTF-8");
-        assert!(
-            cookie.contains("; Domain=localhost"),
-            "clear cookie should include Domain=localhost, got: {cookie}"
-        );
-        assert!(cookie.contains("Max-Age=0"));
-    }
-
-    #[test]
-    fn session_response_proxy_mode_omits_localhost_domain_without_forwarded_host() {
-        let h = headers_with_host("localhost:13131");
-        let resp = session_response("test-token".into(), &h, true, true);
-        let cookie = resp
-            .headers()
-            .get(axum::http::header::SET_COOKIE)
-            .expect("login response must set a session cookie")
-            .to_str()
-            .expect("cookie header must be valid UTF-8");
-        assert!(
-            !cookie.contains("Domain="),
-            "cookie should omit Domain in proxy mode when only upstream localhost host is visible, got: {cookie}"
-        );
-        assert!(
-            cookie.contains("; Secure"),
-            "cookie should include Secure in proxy mode (proxy implies TLS), got: {cookie}"
-        );
-    }
-}
+mod vault;

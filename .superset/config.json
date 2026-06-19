@@ -1,6 +1,6 @@
 {
   "setup": [
-    "mise trust"
+    "bash ./.superset/setup.sh"
   ],
   "teardown": []
 }

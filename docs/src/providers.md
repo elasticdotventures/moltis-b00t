@@ -21,6 +21,7 @@ Configure providers through the web UI or directly in configuration files.
 | **MiniMax** | `minimax` | `MINIMAX_API_KEY` | Streaming, tools |
 | **Moonshot (Kimi)** | `moonshot` | `MOONSHOT_API_KEY` | Streaming, tools, model discovery |
 | **Venice** | `venice` | `VENICE_API_KEY` | Streaming, tools, model discovery |
+| **NEAR AI Cloud** | `nearai` | `NEARAI_API_KEY` | Streaming, TEE-aware model discovery |
 | **Z.AI (Zhipu)** | `zai` | `Z_API_KEY` | Streaming, tools, model discovery |
 | **Z.AI Coding Plan** | `zai-code` | `Z_CODE_API_KEY` | Streaming, tools, model discovery (Coding plan billing endpoint) |
 
@@ -79,7 +80,7 @@ stream_transport = "sse"              # "sse", "websocket", or "auto"
 
 [providers.gemini]
 enabled = true
-models = ["gemini-2.5-flash-preview-05-20", "gemini-2.0-flash"]
+models = ["gemini-2.5-flash", "gemini-2.5-pro"]
 # api_key = "..."                     # Or set GEMINI_API_KEY / GOOGLE_API_KEY env var
 # fetch_models = true                 # Discover models from the API
 # base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
@@ -116,7 +117,7 @@ Google Gemini uses an API key from [Google AI Studio](https://aistudio.google.co
 ```toml
 [providers.gemini]
 enabled = true
-models = ["gemini-2.5-flash-preview-05-20", "gemini-2.0-flash"]
+models = ["gemini-2.5-flash", "gemini-2.5-pro"]
 ```
 
 Gemini supports native tool calling, vision/multimodal inputs, streaming, and automatic model discovery.
@@ -130,6 +131,26 @@ Gemini supports native tool calling, vision/multimodal inputs, streaming, and au
 
 1. Get an API key from [platform.openai.com](https://platform.openai.com/).
 2. Set `OPENAI_API_KEY` in your environment.
+
+### NEAR AI Cloud
+
+NEAR AI Cloud exposes an OpenAI-compatible chat completions API with a public
+model catalog that includes TEE and attestation metadata.
+The API accepts OpenAI-compatible tool schemas, but the public model catalog does
+not currently expose per-model tool capability metadata. Moltis therefore does
+not mark auto-discovered NEAR AI Cloud models as tool-capable.
+
+1. Get an API key from [cloud.near.ai](https://cloud.near.ai/).
+2. Set `NEARAI_API_KEY` in your environment.
+3. Models are discovered from `https://cloud-api.near.ai/v1/model/list`.
+
+```toml
+[providers.nearai]
+enabled = true
+models = ["zai-org/GLM-5.1-FP8"]
+# api_key = "..."                    # Or set NEARAI_API_KEY
+# base_url = "https://cloud-api.near.ai/v1"
+```
 
 ### OpenAI Codex
 
@@ -161,6 +182,12 @@ automatic callback capture fails, the CLI prompts you to paste the callback URL
 (or `code#state`) directly in the terminal.
 Tokens are saved to the config volume and picked up by the gateway automatically.
 ```
+
+Once OpenAI Codex OAuth is connected, agents can use the built-in
+`generate_image` tool to create `gpt-image-2` images without an `OPENAI_API_KEY`.
+Generated images are delivered through the same channel media path as
+screenshots and `send_image`, so supported chat channels receive the image as a
+native attachment.
 
 ### GitHub Copilot
 

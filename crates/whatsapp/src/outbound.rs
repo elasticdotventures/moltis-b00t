@@ -21,6 +21,16 @@ use {
 
 use crate::state::{AccountStateMap, BOT_WATERMARK};
 
+/// Parse a JID from a string, treating bare phone numbers (no `@`) as PN JIDs.
+fn resolve_jid(to: &str) -> ChannelResult<Jid> {
+    if to.contains('@') {
+        to.parse()
+            .map_err(|e| moltis_channels::Error::invalid_input(format!("invalid JID: {e:?}")))
+    } else {
+        Ok(Jid::pn(to))
+    }
+}
+
 // ── Media helpers ────────────────────────────────────────────────────
 
 /// Decode a `data:<mime>;base64,<payload>` URI into raw bytes.
@@ -151,9 +161,7 @@ impl ChannelOutbound for WhatsAppOutbound {
         _reply_to: Option<&str>,
     ) -> ChannelResult<()> {
         let client = self.get_client(account_id)?;
-        let jid: Jid = to
-            .parse()
-            .map_err(|e| moltis_channels::Error::invalid_input(format!("invalid JID: {e:?}")))?;
+        let jid = resolve_jid(to)?;
 
         debug!(
             account_id,
@@ -226,9 +234,7 @@ impl ChannelOutbound for WhatsAppOutbound {
         );
 
         let client = self.get_client(account_id)?;
-        let jid: Jid = to
-            .parse()
-            .map_err(|e| moltis_channels::Error::invalid_input(format!("invalid JID: {e:?}")))?;
+        let jid = resolve_jid(to)?;
 
         let upload = client.upload(bytes, media_type).await.map_err(|e| {
             moltis_channels::Error::unavailable(format!("whatsapp media upload: {e}"))
@@ -254,9 +260,7 @@ impl ChannelOutbound for WhatsAppOutbound {
 
     async fn send_typing(&self, account_id: &str, to: &str) -> ChannelResult<()> {
         let client = self.get_client(account_id)?;
-        let jid: Jid = to
-            .parse()
-            .map_err(|e| moltis_channels::Error::invalid_input(format!("invalid JID: {e:?}")))?;
+        let jid = resolve_jid(to)?;
         client
             .chatstate()
             .send(&jid, ChatStateType::Composing)
@@ -280,7 +284,9 @@ impl ChannelStreamOutbound for WhatsAppOutbound {
         let mut text = String::new();
         while let Some(event) = stream.recv().await {
             match event {
-                StreamEvent::Delta(delta) => text.push_str(&delta),
+                StreamEvent::Delta(delta) | StreamEvent::ProgressDelta(delta) => {
+                    text.push_str(&delta)
+                },
                 StreamEvent::Done => break,
                 StreamEvent::Error(err) => {
                     debug!(account_id, chat_id = to, "WhatsApp stream error: {err}");

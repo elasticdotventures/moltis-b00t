@@ -9,10 +9,13 @@ capabilities that control what features are available.
 | Channel | Inbound Mode | Public URL Required | Key Capabilities |
 |---------|-------------|--------------------|--------------------|
 | Telegram | Polling | No | Streaming, voice ingest, reactions, OTP, location |
-| Discord | Gateway (WebSocket) | No | Streaming, interactive messages, threads, reactions |
-| Microsoft Teams | Webhook | Yes | Streaming, interactive messages, threads |
+| Discord | Gateway (WebSocket) | No | Streaming, interactive messages, threads, voice ingest, reactions |
+| Matrix | Gateway (sync loop) | No | Streaming, voice ingest, interactive polls, threads, reactions, OTP, location, encrypted chats, device verification, ownership bootstrap |
+| Microsoft Teams | Webhook | Yes | Streaming, interactive messages, threads, reactions |
 | WhatsApp | Gateway (WebSocket) | No | Streaming, voice ingest, OTP, pairing, location |
 | Slack | Socket Mode | No | Streaming, interactive messages, threads, reactions |
+| Nostr | Gateway (relay subscription) | No | OTP, encrypted DMs (NIP-04) |
+| Signal | Gateway (signal-cli SSE) | No | OTP, DMs, groups, outbound text |
 
 ## Inbound Modes
 
@@ -24,8 +27,8 @@ or open port is needed. Used by Telegram.
 ### Gateway / WebSocket
 
 The bot opens a persistent outbound WebSocket connection to the platform and
-receives events in real time. No public URL needed. Used by Discord and
-WhatsApp.
+receives events in real time, or uses a persistent sync loop over outbound HTTP.
+No public URL needed. Used by Discord, Matrix, and WhatsApp.
 
 ### Socket Mode
 
@@ -60,7 +63,31 @@ integrations (e.g. email, SMS).
 
 ## Setup
 
-Each channel is configured in `moltis.toml` under `[channels]`:
+Channels can be configured in two places:
+
+- In `moltis.toml` under `[channels]`, for file-managed setups
+- In the web UI under **Settings -> Channels**, which stores channel accounts in the internal `channels` table inside `data_dir()/moltis.db`
+
+The web UI does not write channel settings back into `moltis.toml`. It includes an advanced JSON config editor so channel-specific settings remain reachable even when a dedicated form field has not been added yet.
+
+The channel picker itself is controlled by `[channels].offered` in
+`moltis.toml`. If you edit that list by hand, reload the page so the web UI
+re-reads the current picker options.
+
+Channel configs stored through the web UI currently live as JSON records in the
+internal `channels` table in `data_dir()/moltis.db`. They are not currently
+wrapped by the Moltis vault, so treat local access to that database as access
+to the configured channel credentials.
+
+Some channel integrations also have platform-specific limits. For Matrix,
+encrypted chats require password auth. Access-token auth is only suitable for
+plain Matrix traffic because Moltis cannot import an existing device's private
+E2EE keys from an access token alone. See [Matrix](./matrix.md) for the full
+setup, ownership, verification, and troubleshooting flow.
+
+`moltis.toml` and the web UI are both loaded at startup. If the same `(channel_type, account_id)` exists in both, the `moltis.toml` entry wins.
+
+Manual file configuration looks like this:
 
 ```toml
 [channels.telegram.my_bot]
@@ -79,15 +106,31 @@ token = "..."
 bot_token = "xoxb-..."
 app_token = "xapp-..."
 
+[channels.matrix.my_matrix_bot]
+homeserver = "https://matrix.example.com"
+access_token = "syt_..."
+user_id = "@bot:example.com"
+
 [channels.whatsapp.my_wa]
 dm_policy = "open"
+
+[channels.signal.my_signal]
+account = "+15551234567"
+http_url = "http://127.0.0.1:8080"
 ```
 
 For detailed configuration, see the per-channel pages:
-[Telegram](telegram.md), [Discord](discord.md), [Slack](slack.md),
-[WhatsApp](whatsapp.md).
+[Telegram](telegram.md), [Microsoft Teams](teams.md), [Discord](discord.md),
+[Slack](slack.md), [Matrix](matrix.md), [WhatsApp](whatsapp.md),
+[Nostr](nostr.md), [Signal](signal.md).
 
-You can also use the web UI's **Channels** tab for guided setup with each platform.
+You can also use the web UI's **Channels** tab for guided setup with each platform. Web-added channels do not get written back into `moltis.toml`.
+
+For Matrix specifically, the web UI now supports the full normal setup flow:
+
+- password auth is the default because it unlocks encrypted chats
+- dedicated bot accounts default to `moltis_owned` so Moltis can bootstrap cross-signing and recovery
+- older Matrix accounts that need one external approval expose that approval flow in the channel card instead of failing silently
 
 ## Proactive Outbound Messaging
 
@@ -95,6 +138,7 @@ Agents are not limited to replying in the current chat. Moltis supports three
 main outbound patterns:
 
 - **`send_message` tool** for direct proactive messages to any configured channel account/chat
+- **`update_channel_settings` tool** for safe in-chat edits to channel access rules, allowlists, and model routing
 - **Cron job delivery** for background jobs that should post their final output to a channel
 - **Heartbeat delivery** for periodic heartbeat acknowledgements sent to a chosen chat
 
@@ -108,8 +152,24 @@ Example `send_message` tool call:
 }
 ```
 
-`account_id` is the configured channel account name from `moltis.toml`, and
-`to` is the destination chat, peer, or room identifier for that platform.
+`account_id` is the configured channel account name, either from `moltis.toml` or from a channel account stored through the web UI, and `to` is the destination chat, peer, or room identifier for that platform.
+
+Example `update_channel_settings` tool call:
+
+```json
+{
+  "account_id": "my-telegram-bot",
+  "settings": {
+    "dm_policy": "allowlist",
+    "allowlist_add": ["alice"],
+    "model": "openai/gpt-5"
+  }
+}
+```
+
+`update_channel_settings` intentionally supports a narrow patch surface. It is
+for non-secret channel settings only, not raw `moltis.toml` editing, token
+rotation, or arbitrary config mutation.
 
 ## Access Control
 
@@ -143,7 +203,8 @@ Controls who can interact with the bot in group chats / channels / guilds.
 | `"disabled"` | Group messages are silently ignored |
 
 The group allowlist field name varies by channel: `group_allowlist` (Telegram,
-WhatsApp, MS Teams), `guild_allowlist` (Discord), `channel_allowlist` (Slack).
+WhatsApp, MS Teams), `guild_allowlist` (Discord), `channel_allowlist` (Slack),
+`room_allowlist` (Matrix).
 
 ### Mention Mode
 
@@ -166,7 +227,7 @@ All allowlist fields across all channels share the same matching behavior:
 
 ### OTP Self-Approval
 
-Channels that support OTP (Telegram, Discord, WhatsApp) allow non-allowlisted
+Channels that support OTP (Telegram, Discord, Matrix, WhatsApp) allow non-allowlisted
 users to self-approve by entering a 6-digit code. The code appears in the web UI
 under **Channels > Senders**. See each channel's page for details.
 

@@ -1,4 +1,4 @@
-use std::{collections::HashSet, pin::Pin, sync::mpsc, time::Duration};
+use std::pin::Pin;
 
 use {
     async_trait::async_trait,
@@ -6,16 +6,30 @@ use {
     futures::StreamExt,
     moltis_config::schema::ProviderStreamTransport,
     moltis_oauth::{OAuthFlow, TokenStore, load_oauth_config},
-    secrecy::{ExposeSecret, Secret},
+    secrecy::ExposeSecret,
     tokio_stream::Stream,
-    tracing::{debug, info, trace, warn},
+    tracing::{debug, info, trace},
 };
 
 use moltis_agents::model::{
-    ChatMessage, CompletionResponse, LlmProvider, StreamEvent, ToolCall, Usage, UserContent,
+    AgentToolControls, ChatMessage, CompletionResponse, LlmProvider, ReasoningEffort, StreamEvent,
+    ToolCall, Usage, UserContent, decode_tool_call_arguments_from_str,
 };
 
 use crate::openai_compat::to_responses_api_tools;
+
+mod catalog;
+
+pub use catalog::{
+    available_models, default_model_catalog, has_stored_tokens, live_models, start_model_discovery,
+};
+
+use catalog::load_codex_cli_tokens;
+
+#[cfg(test)]
+use catalog::{
+    CODEX_MODELS_CLIENT_VERSION, DEFAULT_CODEX_MODELS, parse_codex_cli_tokens, parse_models_payload,
+};
 
 pub struct OpenAiCodexProvider {
     model: String,
@@ -23,27 +37,30 @@ pub struct OpenAiCodexProvider {
     client: &'static reqwest::Client,
     token_store: TokenStore,
     stream_transport: ProviderStreamTransport,
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
-const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
-/// Report a client version that satisfies the Codex API's
-/// `minimal_client_version` filter so all available models are returned.
-/// Using the crate's own version (0.x) caused the API to hide newer models
-/// that require >= 0.98.0.  See <https://github.com/moltis-org/moltis/issues/354>.
-///
-/// **DO NOT** change this to `env!("CARGO_PKG_VERSION")` — the crate version
-/// is unrelated to the Codex client version and will break model discovery.
-const CODEX_MODELS_CLIENT_VERSION: &str = "1.0.0";
+fn codex_done_arguments(evt: &serde_json::Value) -> Option<&str> {
+    evt.get("arguments")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+}
 
-const DEFAULT_CODEX_MODELS: &[(&str, &str)] = &[
-    ("gpt-5.4", "GPT-5.4"),
-    ("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
-    ("gpt-5.3-codex", "GPT-5.3 Codex"),
-    ("gpt-5.2-codex", "GPT-5.2 Codex"),
-    ("gpt-5.2", "GPT-5.2"),
-    ("gpt-5.1-codex-max", "GPT-5.1 Codex Max"),
-    ("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini"),
-];
+fn record_codex_done_arguments(fn_call_args: &mut [String], evt: &serde_json::Value) {
+    let Some(arguments) = codex_done_arguments(evt) else {
+        return;
+    };
+    if let Some(last) = fn_call_args.last_mut() {
+        let had_delta = !last.is_empty();
+        debug!(
+            raw_len = arguments.len(),
+            had_delta, "openai-codex function call arguments completed"
+        );
+        if !had_delta {
+            *last = arguments.to_string();
+        }
+    }
+}
 
 impl OpenAiCodexProvider {
     pub fn new(model: String) -> Self {
@@ -57,6 +74,16 @@ impl OpenAiCodexProvider {
             client: crate::shared_http_client(),
             token_store: TokenStore::new(),
             stream_transport,
+            reasoning_effort: None,
+        }
+    }
+
+    /// Add `reasoning.effort` to a Responses-API request body when an effort
+    /// is configured. GPT-5 family models accept `minimal`, `low`, `medium`,
+    /// `high`, and `xhigh` (matching the official Codex client).
+    fn apply_reasoning(&self, body: &mut serde_json::Value) {
+        if let Some(effort) = self.reasoning_effort {
+            body["reasoning"]["effort"] = serde_json::json!(effort.as_str());
         }
     }
 
@@ -75,7 +102,7 @@ impl OpenAiCodexProvider {
         }
     }
 
-    async fn get_valid_tokens(&self) -> anyhow::Result<moltis_oauth::OAuthTokens> {
+    pub(crate) async fn get_valid_tokens(&self) -> anyhow::Result<moltis_oauth::OAuthTokens> {
         let tokens = self
             .token_store
             .load("openai-codex")
@@ -166,7 +193,7 @@ impl OpenAiCodexProvider {
         Self::extract_account_id_from_claims(&claims)
     }
 
-    fn resolve_account_id(tokens: &moltis_oauth::OAuthTokens) -> anyhow::Result<String> {
+    pub(crate) fn resolve_account_id(tokens: &moltis_oauth::OAuthTokens) -> anyhow::Result<String> {
         if let Some(account_id) = tokens
             .account_id
             .as_ref()
@@ -194,7 +221,7 @@ impl OpenAiCodexProvider {
                         // System messages are extracted as instructions; skip here
                         vec![]
                     },
-                    ChatMessage::User { content } => {
+                    ChatMessage::User { content, .. } => {
                         let content_blocks = match content {
                             UserContent::Text(t) => {
                                 vec![serde_json::json!({"type": "input_text", "text": t})]
@@ -238,6 +265,7 @@ impl OpenAiCodexProvider {
                     ChatMessage::Assistant {
                         content,
                         tool_calls,
+                        ..
                     } => {
                         if !tool_calls.is_empty() {
                             let mut items: Vec<serde_json::Value> = vec![];
@@ -331,290 +359,6 @@ impl OpenAiCodexProvider {
     }
 }
 
-/// Parse tokens from Codex CLI auth.json content.
-fn parse_codex_cli_tokens(data: &str) -> Option<moltis_oauth::OAuthTokens> {
-    let json: serde_json::Value = serde_json::from_str(data).ok()?;
-    let tokens = json.get("tokens")?;
-    let access_token = tokens.get("access_token")?.as_str()?.to_string();
-    let id_token = tokens
-        .get("id_token")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let account_id = tokens
-        .get("account_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let refresh_token = tokens
-        .get("refresh_token")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    Some(moltis_oauth::OAuthTokens {
-        access_token: Secret::new(access_token),
-        refresh_token: refresh_token.map(Secret::new),
-        id_token: id_token.map(Secret::new),
-        account_id,
-        expires_at: None,
-    })
-}
-
-/// Try to load tokens from the Codex CLI file at `~/.codex/auth.json`.
-fn load_codex_cli_tokens() -> Option<moltis_oauth::OAuthTokens> {
-    let home = std::env::var("HOME").ok()?;
-    let path = std::path::PathBuf::from(home)
-        .join(".codex")
-        .join("auth.json");
-    let data = std::fs::read_to_string(path).ok()?;
-    parse_codex_cli_tokens(&data)
-}
-
-pub fn has_stored_tokens() -> bool {
-    TokenStore::new().load("openai-codex").is_some() || load_codex_cli_tokens().is_some()
-}
-
-pub fn default_model_catalog() -> Vec<super::DiscoveredModel> {
-    DEFAULT_CODEX_MODELS
-        .iter()
-        .map(|(id, name)| super::DiscoveredModel::new(*id, *name))
-        .collect()
-}
-
-fn formatted_model_name(model_id: &str) -> String {
-    let mut out = Vec::new();
-    for part in model_id.split('-') {
-        let item = match part {
-            "gpt" => "GPT".to_string(),
-            "codex" => "Codex".to_string(),
-            "mini" => "Mini".to_string(),
-            "max" => "Max".to_string(),
-            other => {
-                if other.is_empty() {
-                    continue;
-                }
-                let mut chars = other.chars();
-                match chars.next() {
-                    Some(first) => {
-                        let mut chunk = String::new();
-                        chunk.push(first.to_ascii_uppercase());
-                        chunk.push_str(chars.as_str());
-                        chunk
-                    },
-                    None => continue,
-                }
-            },
-        };
-        out.push(item);
-    }
-    if out.is_empty() {
-        model_id.to_string()
-    } else {
-        out.join(" ")
-    }
-}
-
-fn normalize_display_name(model_id: &str, display_name: Option<&str>) -> String {
-    let normalized = display_name
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(model_id);
-    if normalized == model_id {
-        return formatted_model_name(model_id);
-    }
-    normalized.to_string()
-}
-
-fn is_likely_model_id(model_id: &str) -> bool {
-    if model_id.is_empty() || model_id.len() > 120 {
-        return false;
-    }
-    if model_id.chars().any(char::is_whitespace) {
-        return false;
-    }
-    model_id
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':'))
-}
-
-fn parse_model_entry(entry: &serde_json::Value) -> Option<super::DiscoveredModel> {
-    let obj = entry.as_object()?;
-    let model_id = obj
-        .get("id")
-        .or_else(|| obj.get("slug"))
-        .or_else(|| obj.get("model"))
-        .and_then(serde_json::Value::as_str)?;
-
-    if !is_likely_model_id(model_id) {
-        return None;
-    }
-
-    let display_name = obj
-        .get("display_name")
-        .or_else(|| obj.get("displayName"))
-        .or_else(|| obj.get("name"))
-        .or_else(|| obj.get("title"))
-        .and_then(serde_json::Value::as_str);
-
-    let created_at = obj.get("created").and_then(serde_json::Value::as_i64);
-
-    Some(
-        super::DiscoveredModel::new(model_id, normalize_display_name(model_id, display_name))
-            .with_created_at(created_at),
-    )
-}
-
-fn collect_candidate_arrays<'a>(
-    value: &'a serde_json::Value,
-    out: &mut Vec<&'a serde_json::Value>,
-) {
-    match value {
-        serde_json::Value::Array(items) => out.extend(items),
-        serde_json::Value::Object(map) => {
-            for key in ["models", "data", "items", "results", "available"] {
-                if let Some(nested) = map.get(key) {
-                    collect_candidate_arrays(nested, out);
-                }
-            }
-        },
-        _ => {},
-    }
-}
-
-fn parse_models_payload(value: &serde_json::Value) -> Vec<super::DiscoveredModel> {
-    let mut candidates = Vec::new();
-    collect_candidate_arrays(value, &mut candidates);
-
-    let mut models = Vec::new();
-    let mut seen = HashSet::new();
-    for entry in candidates {
-        if let Some(model) = parse_model_entry(entry)
-            && seen.insert(model.id.clone())
-        {
-            models.push(model);
-        }
-    }
-
-    // Sort by created_at descending (newest first). Models without a
-    // timestamp are placed after those with one, preserving relative order.
-    models.sort_by(|a, b| match (a.created_at, b.created_at) {
-        (Some(a_ts), Some(b_ts)) => b_ts.cmp(&a_ts), // newest first
-        (Some(_), None) => std::cmp::Ordering::Less, // timestamp before no-timestamp
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    });
-
-    models
-}
-
-async fn fetch_models_from_api(
-    access_token: String,
-    account_id: String,
-) -> anyhow::Result<Vec<super::DiscoveredModel>> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
-        .build()?;
-    let url = format!("{CODEX_MODELS_ENDPOINT}?client_version={CODEX_MODELS_CLIENT_VERSION}");
-    let response = client
-        .get(url)
-        .header("Authorization", format!("Bearer {access_token}"))
-        .header("chatgpt-account-id", account_id)
-        .header("originator", "pi")
-        .header("accept", "application/json")
-        .send()
-        .await?;
-    let status = response.status();
-    let body = response.text().await?;
-    if !status.is_success() {
-        anyhow::bail!("codex models API error HTTP {status}");
-    }
-    let payload: serde_json::Value = serde_json::from_str(&body)?;
-    let models = parse_models_payload(&payload);
-    if models.is_empty() {
-        anyhow::bail!("codex models API returned no models");
-    }
-    Ok(models)
-}
-
-/// Spawn model discovery in a background thread and return the receiver
-/// immediately, without blocking. Returns `None` if tokens are not configured.
-pub fn start_model_discovery() -> Option<mpsc::Receiver<anyhow::Result<Vec<super::DiscoveredModel>>>>
-{
-    let (access_token, account_id) = load_access_token_and_account_id().ok()?;
-    let (tx, rx) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let result = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(anyhow::Error::from)
-            .and_then(|rt| rt.block_on(fetch_models_from_api(access_token, account_id)));
-        let _ = tx.send(result);
-    });
-    Some(rx)
-}
-
-fn fetch_models_blocking(
-    access_token: String,
-    account_id: String,
-) -> anyhow::Result<Vec<super::DiscoveredModel>> {
-    let (tx, rx) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let result = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(anyhow::Error::from)
-            .and_then(|rt| rt.block_on(fetch_models_from_api(access_token, account_id)));
-        let _ = tx.send(result);
-    });
-    rx.recv()
-        .map_err(|err| anyhow::anyhow!("codex model discovery worker failed: {err}"))?
-}
-
-fn load_access_token_and_account_id() -> anyhow::Result<(String, String)> {
-    let tokens = TokenStore::new()
-        .load("openai-codex")
-        .or_else(load_codex_cli_tokens)
-        .ok_or_else(|| {
-            debug!("openai-codex tokens not found in token store or codex CLI auth");
-            anyhow::anyhow!("openai-codex tokens not found")
-        })?;
-
-    let access_token = tokens.access_token.expose_secret().clone();
-    let account_id = OpenAiCodexProvider::resolve_account_id(&tokens)?;
-    Ok((access_token, account_id))
-}
-
-pub fn live_models() -> anyhow::Result<Vec<super::DiscoveredModel>> {
-    let (access_token, account_id) = load_access_token_and_account_id()?;
-    let models = fetch_models_blocking(access_token, account_id)?;
-    info!(
-        model_count = models.len(),
-        "loaded openai-codex live models"
-    );
-    Ok(models)
-}
-
-pub fn available_models() -> Vec<super::DiscoveredModel> {
-    let fallback = default_model_catalog();
-    let discovered = match live_models() {
-        Ok(models) => models,
-        Err(err) => {
-            let msg = err.to_string();
-            if msg.contains("tokens not found") || msg.contains("not logged in") {
-                debug!(error = %err, "openai-codex not configured, using fallback catalog");
-            } else {
-                warn!(error = %err, "failed to fetch openai-codex models, using fallback catalog");
-            }
-            return fallback;
-        },
-    };
-
-    let merged = super::merge_discovered_with_fallback_catalog(discovered, fallback);
-
-    info!(
-        model_count = merged.len(),
-        "loaded openai-codex models catalog"
-    );
-    merged
-}
-
 #[async_trait]
 impl LlmProvider for OpenAiCodexProvider {
     fn name(&self) -> &str {
@@ -629,10 +373,38 @@ impl LlmProvider for OpenAiCodexProvider {
         super::supports_tools_for_model(&self.model)
     }
 
+    fn reasoning_effort(&self) -> Option<ReasoningEffort> {
+        self.reasoning_effort
+    }
+
+    fn with_reasoning_effort(
+        self: std::sync::Arc<Self>,
+        effort: ReasoningEffort,
+    ) -> Option<std::sync::Arc<dyn LlmProvider>> {
+        Some(std::sync::Arc::new(Self {
+            model: self.model.clone(),
+            base_url: self.base_url.clone(),
+            client: self.client,
+            token_store: self.token_store.clone(),
+            stream_transport: self.stream_transport,
+            reasoning_effort: Some(effort),
+        }))
+    }
+
     async fn complete(
         &self,
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
+    ) -> anyhow::Result<CompletionResponse> {
+        self.complete_with_options(messages, tools, &AgentToolControls::default())
+            .await
+    }
+
+    async fn complete_with_options(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+        options: &AgentToolControls,
     ) -> anyhow::Result<CompletionResponse> {
         self.ensure_supported_stream_transport()?;
 
@@ -665,11 +437,12 @@ impl LlmProvider for OpenAiCodexProvider {
             "text": {"verbosity": "medium"},
             "include": ["reasoning.encrypted_content"],
         });
+        self.apply_reasoning(&mut body);
 
         if !tools.is_empty() {
             body["tools"] = serde_json::Value::Array(to_responses_api_tools(tools));
-            body["tool_choice"] = serde_json::json!("auto");
         }
+        crate::openai::provider::core::apply_openai_responses_tool_choice(&mut body, options)?;
 
         trace!(body = %serde_json::to_string(&body).unwrap_or_default(), "openai-codex request body");
 
@@ -686,6 +459,7 @@ impl LlmProvider for OpenAiCodexProvider {
         let mut fn_call_args: Vec<String> = vec![];
         let mut input_tokens: u32 = 0;
         let mut output_tokens: u32 = 0;
+        let mut cache_read_tokens: u32 = 0;
 
         let mut byte_stream = http_resp.bytes_stream();
         let mut buf = String::new();
@@ -717,14 +491,12 @@ impl LlmProvider for OpenAiCodexProvider {
                             text_buf.push_str(delta);
                         }
                     },
-                    "response.output_item.added" => {
-                        if evt["item"]["type"].as_str() == Some("function_call") {
-                            fn_call_ids
-                                .push(evt["item"]["call_id"].as_str().unwrap_or("").to_string());
-                            fn_call_names
-                                .push(evt["item"]["name"].as_str().unwrap_or("").to_string());
-                            fn_call_args.push(String::new());
-                        }
+                    "response.output_item.added"
+                        if evt["item"]["type"].as_str() == Some("function_call") =>
+                    {
+                        fn_call_ids.push(evt["item"]["call_id"].as_str().unwrap_or("").to_string());
+                        fn_call_names.push(evt["item"]["name"].as_str().unwrap_or("").to_string());
+                        fn_call_args.push(String::new());
                     },
                     "response.function_call_arguments.delta" => {
                         if let Some(delta) = evt["delta"].as_str()
@@ -734,7 +506,7 @@ impl LlmProvider for OpenAiCodexProvider {
                         }
                     },
                     "response.function_call_arguments.done" => {
-                        // function call complete — will be collected at the end
+                        record_codex_done_arguments(&mut fn_call_args, &evt);
                     },
                     "response.completed" => {
                         if let Some(u) = evt["response"]["usage"].as_object() {
@@ -742,6 +514,11 @@ impl LlmProvider for OpenAiCodexProvider {
                                 u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                             output_tokens =
                                 u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                            cache_read_tokens =
+                                u.get("input_tokens_details")
+                                    .and_then(|d| d.get("cached_tokens"))
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0) as u32;
                         }
                     },
                     "error" | "response.failed" => {
@@ -759,11 +536,13 @@ impl LlmProvider for OpenAiCodexProvider {
         // Build tool calls from collected parts
         for i in 0..fn_call_ids.len() {
             let args_str = &fn_call_args[i];
-            let arguments = serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
+            let decoded = decode_tool_call_arguments_from_str(args_str);
             tool_calls.push(ToolCall {
                 id: fn_call_ids[i].clone(),
                 name: fn_call_names[i].clone(),
-                arguments,
+                arguments: decoded.arguments,
+                argument_diagnostic: decoded.diagnostic,
+                metadata: None,
             });
         }
 
@@ -779,6 +558,7 @@ impl LlmProvider for OpenAiCodexProvider {
             usage: Usage {
                 input_tokens,
                 output_tokens,
+                cache_read_tokens,
                 ..Default::default()
             },
         })
@@ -797,6 +577,15 @@ impl LlmProvider for OpenAiCodexProvider {
         &self,
         messages: Vec<ChatMessage>,
         tools: Vec<serde_json::Value>,
+    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+        self.stream_with_tools_and_options(messages, tools, AgentToolControls::default())
+    }
+
+    fn stream_with_tools_and_options(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<serde_json::Value>,
+        options: AgentToolControls,
     ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
         info!(
             tools_received = tools.len(),
@@ -848,10 +637,14 @@ impl LlmProvider for OpenAiCodexProvider {
                 "text": {"verbosity": "medium"},
                 "include": ["reasoning.encrypted_content"],
             });
+            self.apply_reasoning(&mut body);
 
             if !tools.is_empty() {
                 body["tools"] = serde_json::Value::Array(to_responses_api_tools(&tools));
-                body["tool_choice"] = serde_json::json!("auto");
+            }
+            if let Err(error) = crate::openai::provider::core::apply_openai_responses_tool_choice(&mut body, &options) {
+                yield StreamEvent::Error(error.to_string());
+                return;
             }
 
             info!(
@@ -877,11 +670,13 @@ impl LlmProvider for OpenAiCodexProvider {
             let mut buf = String::new();
             let mut input_tokens: u32 = 0;
             let mut output_tokens: u32 = 0;
+            let mut cache_read_tokens: u32 = 0;
 
             // Track tool calls being streamed (index -> (id, name))
             let mut tool_calls: std::collections::HashMap<usize, (String, String)> =
                 std::collections::HashMap::new();
             let mut current_tool_index: usize = 0;
+            let mut current_tool_has_arg_delta = false;
 
             while let Some(chunk) = byte_stream.next().await {
                 let chunk = match chunk {
@@ -910,7 +705,12 @@ impl LlmProvider for OpenAiCodexProvider {
                         for index in tool_calls.keys() {
                             yield StreamEvent::ToolCallComplete { index: *index };
                         }
-                        yield StreamEvent::Done(Usage { input_tokens, output_tokens, ..Default::default() });
+                        yield StreamEvent::Done(Usage {
+                            input_tokens,
+                            output_tokens,
+                            cache_read_tokens,
+                            ..Default::default()
+                        });
                         return;
                     }
 
@@ -920,27 +720,48 @@ impl LlmProvider for OpenAiCodexProvider {
 
                         match evt_type {
                             "response.output_text.delta" => {
-                                if let Some(delta) = evt["delta"].as_str() {
-                                    if !delta.is_empty() {
-                                        yield StreamEvent::Delta(delta.to_string());
-                                    }
+                                if let Some(delta) = evt["delta"].as_str()
+                                    && !delta.is_empty()
+                                {
+                                    yield StreamEvent::Delta(delta.to_string());
                                 }
                             }
-                            "response.output_item.added" => {
-                                // New output item - could be text or function_call
-                                if evt["item"]["type"].as_str() == Some("function_call") {
-                                    let id = evt["item"]["call_id"].as_str().unwrap_or("").to_string();
-                                    let name = evt["item"]["name"].as_str().unwrap_or("").to_string();
-                                    let index = current_tool_index;
-                                    current_tool_index += 1;
-                                    tool_calls.insert(index, (id.clone(), name.clone()));
-                                    yield StreamEvent::ToolCallStart { id, name, index };
-                                }
+                            "response.output_item.added"
+                                if evt["item"]["type"].as_str() == Some("function_call") =>
+                            {
+                                let id = evt["item"]["call_id"].as_str().unwrap_or("").to_string();
+                                let name = evt["item"]["name"].as_str().unwrap_or("").to_string();
+                                let index = current_tool_index;
+                                current_tool_index += 1;
+                                current_tool_has_arg_delta = false;
+                                tool_calls.insert(index, (id.clone(), name.clone()));
+                                yield StreamEvent::ToolCallStart { id, name, index, metadata: None };
                             }
                             "response.function_call_arguments.delta" => {
-                                if let Some(delta) = evt["delta"].as_str() {
-                                    if !delta.is_empty() {
-                                        // Find the index for this tool call (use the most recent one)
+                                if let Some(delta) = evt["delta"].as_str()
+                                    && !delta.is_empty()
+                                {
+                                    current_tool_has_arg_delta = true;
+                                    // Find the index for this tool call (use the most recent one)
+                                    let index = if current_tool_index > 0 {
+                                        current_tool_index - 1
+                                    } else {
+                                        0
+                                    };
+                                    yield StreamEvent::ToolCallArgumentsDelta {
+                                        index,
+                                        delta: delta.to_string(),
+                                    };
+                                }
+                            }
+                            "response.function_call_arguments.done" => {
+                                if let Some(arguments) = codex_done_arguments(&evt) {
+                                    debug!(
+                                        raw_len = arguments.len(),
+                                        had_delta = current_tool_has_arg_delta,
+                                        "openai-codex streaming function call arguments completed"
+                                    );
+                                    if !current_tool_has_arg_delta {
                                         let index = if current_tool_index > 0 {
                                             current_tool_index - 1
                                         } else {
@@ -948,13 +769,10 @@ impl LlmProvider for OpenAiCodexProvider {
                                         };
                                         yield StreamEvent::ToolCallArgumentsDelta {
                                             index,
-                                            delta: delta.to_string(),
+                                            delta: arguments.to_string(),
                                         };
                                     }
                                 }
-                            }
-                            "response.function_call_arguments.done" => {
-                                // Function call arguments complete - tool call will be finalized at [DONE]
                             }
                             "response.completed" => {
                                 if let Some(u) = evt["response"]["usage"].as_object() {
@@ -964,12 +782,22 @@ impl LlmProvider for OpenAiCodexProvider {
                                     output_tokens = u.get("output_tokens")
                                         .and_then(|v| v.as_u64())
                                         .unwrap_or(0) as u32;
+                                    cache_read_tokens = u
+                                        .get("input_tokens_details")
+                                        .and_then(|d| d.get("cached_tokens"))
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0) as u32;
                                 }
                                 // Emit completion for any pending tool calls
                                 for index in tool_calls.keys() {
                                     yield StreamEvent::ToolCallComplete { index: *index };
                                 }
-                                yield StreamEvent::Done(Usage { input_tokens, output_tokens, ..Default::default() });
+                                yield StreamEvent::Done(Usage {
+                                    input_tokens,
+                                    output_tokens,
+                                    cache_read_tokens,
+                                    ..Default::default()
+                                });
                                 return;
                             }
                             "error" | "response.failed" => {
@@ -992,9 +820,112 @@ impl LlmProvider for OpenAiCodexProvider {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use moltis_agents::model::UserContent;
 
     use super::*;
+
+    #[test]
+    fn with_reasoning_effort_returns_new_provider_with_effort_stored() {
+        let provider = Arc::new(OpenAiCodexProvider::new("gpt-5.4".to_string()));
+        assert!(provider.reasoning_effort().is_none());
+
+        let updated = Arc::clone(&provider)
+            .with_reasoning_effort(ReasoningEffort::High)
+            .expect("openai-codex must support reasoning_effort");
+
+        assert_eq!(updated.reasoning_effort(), Some(ReasoningEffort::High));
+        // Original provider is unchanged (immutable update).
+        assert!(provider.reasoning_effort().is_none());
+        assert_eq!(updated.id(), "gpt-5.4");
+        assert_eq!(updated.name(), "openai-codex");
+    }
+
+    #[test]
+    fn apply_reasoning_is_noop_when_effort_not_configured() {
+        let provider = OpenAiCodexProvider::new("gpt-5.4".to_string());
+        let mut body = serde_json::json!({
+            "include": ["reasoning.encrypted_content"],
+        });
+        provider.apply_reasoning(&mut body);
+
+        assert!(
+            body.get("reasoning").is_none(),
+            "reasoning key should be absent when no effort configured, got: {body}"
+        );
+        assert_eq!(
+            body["include"],
+            serde_json::json!(["reasoning.encrypted_content"]),
+            "apply_reasoning must not disturb the pre-existing include field, got: {body}"
+        );
+    }
+
+    #[test]
+    fn apply_reasoning_maps_each_effort_level_to_wire_value() {
+        for (effort, expected) in [
+            (ReasoningEffort::Minimal, "minimal"),
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "high"),
+            (ReasoningEffort::ExtraHigh, "xhigh"),
+        ] {
+            let mut provider = OpenAiCodexProvider::new("gpt-5.4".to_string());
+            provider.reasoning_effort = Some(effort);
+            let mut body = serde_json::json!({
+                "include": ["reasoning.encrypted_content"],
+            });
+            provider.apply_reasoning(&mut body);
+            assert_eq!(
+                body["reasoning"]["effort"], expected,
+                "unexpected wire value for {effort:?}"
+            );
+            assert_eq!(
+                body["include"],
+                serde_json::json!(["reasoning.encrypted_content"]),
+                "apply_reasoning must not disturb include when effort is set, got: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_done_arguments_extracts_final_arguments() {
+        let evt = serde_json::json!({
+            "type": "response.function_call_arguments.done",
+            "arguments": "{\"command\":\"echo ok\"}"
+        });
+
+        assert_eq!(
+            codex_done_arguments(&evt),
+            Some("{\"command\":\"echo ok\"}")
+        );
+    }
+
+    #[test]
+    fn record_codex_done_arguments_fills_empty_accumulator() {
+        let evt = serde_json::json!({
+            "type": "response.function_call_arguments.done",
+            "arguments": "{\"command\":\"echo ok\"}"
+        });
+        let mut args = vec![String::new()];
+
+        record_codex_done_arguments(&mut args, &evt);
+
+        assert_eq!(args, vec!["{\"command\":\"echo ok\"}".to_string()]);
+    }
+
+    #[test]
+    fn record_codex_done_arguments_preserves_existing_delta_accumulator() {
+        let evt = serde_json::json!({
+            "type": "response.function_call_arguments.done",
+            "arguments": "{\"command\":\"echo done\"}"
+        });
+        let mut args = vec!["{\"command\":\"echo delta\"}".to_string()];
+
+        record_codex_done_arguments(&mut args, &evt);
+
+        assert_eq!(args, vec!["{\"command\":\"echo delta\"}".to_string()]);
+    }
 
     #[tokio::test]
     async fn websocket_transport_returns_clear_error() {
@@ -1121,6 +1052,8 @@ mod tests {
                 id: "call_1".to_string(),
                 name: "get_time".to_string(),
                 arguments: serde_json::json!({}),
+                argument_diagnostic: None,
+                metadata: None,
             }]),
             ChatMessage::tool("call_1", "12:00"),
         ];
@@ -1250,6 +1183,8 @@ mod tests {
                 id: "call_screenshot".to_string(),
                 name: "browser_screenshot".to_string(),
                 arguments: serde_json::json!({}),
+                argument_diagnostic: None,
+                metadata: None,
             }]),
             ChatMessage::tool("call_screenshot", &tool_output),
             ChatMessage::assistant("Here is the screenshot."),
@@ -1294,6 +1229,7 @@ mod tests {
                     data: "ABC123".to_string(),
                 },
             ]),
+            name: None,
         }];
         let converted = OpenAiCodexProvider::convert_messages(&messages);
         assert_eq!(converted.len(), 1);
@@ -1327,64 +1263,5 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_models_payload_from_models_array() {
-        let value = serde_json::json!({
-            "models": [
-                {"id": "gpt-5.3", "name": "GPT-5.3"},
-                {"id": "gpt-5.2-codex", "display_name": "GPT-5.2 Codex"}
-            ]
-        });
-        let models = parse_models_payload(&value);
-        assert_eq!(models.len(), 2);
-        assert_eq!(models[0].id, "gpt-5.3");
-        assert_eq!(models[0].display_name, "GPT-5.3");
-        assert_eq!(models[1].id, "gpt-5.2-codex");
-    }
-
-    #[test]
-    fn parse_models_payload_from_nested_data_array() {
-        let value = serde_json::json!({
-            "data": {
-                "items": [
-                    {"slug": "gpt-5.3-codex"},
-                    {"model": "gpt-5.1-codex-mini", "title": "GPT-5.1 Codex Mini"}
-                ]
-            }
-        });
-        let models = parse_models_payload(&value);
-        assert_eq!(models.len(), 2);
-        assert_eq!(models[0].id, "gpt-5.3-codex");
-        assert_eq!(models[0].display_name, "GPT 5.3 Codex");
-        assert_eq!(models[1].id, "gpt-5.1-codex-mini");
-    }
-
-    #[test]
-    fn parse_models_payload_ignores_invalid_ids_and_dedupes() {
-        let value = serde_json::json!({
-            "models": [
-                {"id": "gpt-5.3"},
-                {"id": "gpt-5.3", "name": "Duplicate"},
-                {"id": "this has spaces"},
-                {"id": ""}
-            ]
-        });
-        let models = parse_models_payload(&value);
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "gpt-5.3");
-    }
-
-    #[test]
-    fn parse_models_payload_keeps_non_codex_and_codex_variants() {
-        let value = serde_json::json!({
-            "models": [
-                {"id": "gpt-5.3", "name": "GPT-5.3"},
-                {"id": "gpt-5.3-codex", "name": "GPT-5.3 Codex"}
-            ]
-        });
-        let models = parse_models_payload(&value);
-        assert_eq!(models.len(), 2);
-        assert_eq!(models[0].id, "gpt-5.3");
-        assert_eq!(models[1].id, "gpt-5.3-codex");
-    }
+    mod model_payload_tests;
 }

@@ -3,6 +3,7 @@ const {
 	createSession,
 	expectPageContentMounted,
 	navigateAndWait,
+	sendRpcFromPage,
 	waitForWsConnected,
 	watchPageErrors,
 } = require("../helpers");
@@ -13,26 +14,98 @@ async function waitForWelcomeOrNoProvidersCard(page) {
 		timeout: 10_000,
 	});
 
-	const noProvidersCard = page.locator("#noProvidersCard");
-	const noProvidersVisible = await noProvidersCard.isVisible().catch(() => false);
-	if (noProvidersVisible) {
-		await expect(noProvidersCard.getByRole("heading", { name: "No LLMs Connected", exact: true })).toBeVisible();
-		await expect(noProvidersCard.getByRole("link", { name: "Go to LLMs", exact: true })).toBeVisible();
-		return null;
+	// The two cards can swap during load: if models haven't arrived yet when the
+	// session opens, #noProvidersCard is rendered first and then replaced with
+	// #welcomeCard once models load (see refreshWelcomeCardIfNeeded in
+	// sessions.js). Prefer the welcome card if it eventually appears, and only
+	// treat the no-providers state as final when the welcome card never shows.
+	const welcomeCard = page.locator("#welcomeCard");
+	try {
+		await expect(welcomeCard).toBeVisible({ timeout: 5_000 });
+		return welcomeCard;
+	} catch {
+		// Welcome card never materialized — we're in the no-providers state.
 	}
 
-	const welcomeCard = page.locator("#welcomeCard");
-	await expect(welcomeCard).toBeVisible({ timeout: 10_000 });
-	return welcomeCard;
+	const noProvidersCard = page.locator("#noProvidersCard");
+	await expect(noProvidersCard).toBeVisible();
+	await expect(noProvidersCard.getByRole("heading", { name: "No LLMs Connected", exact: true })).toBeVisible();
+	await expect(noProvidersCard.getByRole("link", { name: "Go to LLMs", exact: true })).toBeVisible();
+	return null;
 }
 
 async function deleteAgentByName(page, agentName) {
 	await navigateAndWait(page, "/settings/agents");
-	const testCard = page.locator(".backend-card").filter({ hasText: agentName });
+	const testCard = page
+		.locator(".backend-card")
+		.filter({ hasText: agentName })
+		.filter({ has: page.getByRole("button", { name: "Delete", exact: true }) });
 	await expect(testCard).toBeVisible({ timeout: 10_000 });
 	await testCard.getByRole("button", { name: "Delete", exact: true }).click();
 	await page.locator(".provider-modal").getByRole("button", { name: "Delete", exact: true }).click();
 	await expect(testCard).toHaveCount(0, { timeout: 10_000 });
+}
+
+async function mockExternalAgentsRpc(page, listPayload) {
+	await page.addInitScript((externalAgentsListPayload) => {
+		if (window.__externalAgentE2EPatched) return;
+		window.__externalAgentE2EPatched = true;
+		window.__externalAgentE2ERequests = [];
+		window.__externalAgentE2EListPayload = externalAgentsListPayload || [
+			{ kind: "codex", name: "Codex", installed: true, version: null },
+			{ kind: "claude-code", name: "Claude Code", installed: false, version: null },
+		];
+		const originalSend = WebSocket.prototype.send;
+
+		function respond(socket, id, payload) {
+			queueMicrotask(() => {
+				const event = new MessageEvent("message", {
+					data: JSON.stringify({ type: "res", id, ok: true, payload }),
+				});
+				if (typeof socket.onmessage === "function") socket.onmessage(event);
+			});
+		}
+
+		WebSocket.prototype.send = function (payload) {
+			try {
+				var parsed = JSON.parse(payload);
+				if (parsed?.method === "external_agents.list") {
+					window.__externalAgentE2ERequests.push({ method: parsed.method, params: parsed.params || {} });
+					respond(this, parsed.id, window.__externalAgentE2EListPayload);
+					return;
+				}
+				if (parsed?.method === "external_agents.bind") {
+					window.__externalAgentE2ERequests.push({ method: parsed.method, params: parsed.params || {} });
+					respond(this, parsed.id, { ok: true, sessionKey: parsed.params?.sessionKey, kind: parsed.params?.kind });
+					return;
+				}
+				if (parsed?.method === "external_agents.unbind") {
+					window.__externalAgentE2ERequests.push({ method: parsed.method, params: parsed.params || {} });
+					respond(this, parsed.id, { ok: true, sessionKey: parsed.params?.sessionKey });
+					return;
+				}
+			} catch (_err) {
+				// Fall through to the original sender.
+			}
+			return originalSend.call(this, payload);
+		};
+	}, listPayload);
+}
+
+async function expectActiveSessionExternalAgent(page, kind) {
+	await expect
+		.poll(
+			async () =>
+				page.evaluate((nextKind) => {
+					const session = window.__moltis_stores?.sessionStore?.activeSession?.value;
+					if (!session) return undefined;
+					session.external_agent_kind = nextKind;
+					session.dataVersion.value++;
+					return session.external_agent_kind;
+				}, kind),
+			{ timeout: 10_000 },
+		)
+		.toBe(kind);
 }
 
 test.describe("Agents settings page", () => {
@@ -42,6 +115,20 @@ test.describe("Agents settings page", () => {
 
 		await expect(page).toHaveURL(/\/settings\/agents$/);
 		await expect(page.getByRole("heading", { name: "Agents", exact: true })).toBeVisible();
+		await expect(page.getByRole("tab", { name: /Chat Agents/ })).toBeVisible();
+		await expect(page.getByRole("tab", { name: /Sub-Agents/ })).toBeVisible();
+		await expect(page.getByRole("tab", { name: /Modes/ })).toBeVisible();
+
+		const chatPanel = page.getByLabel("Chat Agents panel");
+		await expect(chatPanel.getByText("Persistent identities with their own memory", { exact: false })).toBeVisible();
+
+		await page.getByRole("tab", { name: /Modes/ }).click();
+		const modesPanel = page.getByLabel("Modes panel");
+		await expect(modesPanel.getByText("Temporary per-session prompt overlays", { exact: false })).toBeVisible();
+		await expect(modesPanel.locator(".backend-card").filter({ hasText: "Concise" })).toBeVisible({
+			timeout: 10_000,
+		});
+		await expect(modesPanel.locator(".backend-card").filter({ hasText: "Review" })).toBeVisible();
 
 		expect(pageErrors).toEqual([]);
 	});
@@ -53,9 +140,8 @@ test.describe("Agents settings page", () => {
 		const mainCard = page.locator(".backend-card").filter({ hasText: "Default" });
 		await expect(mainCard).toBeVisible();
 
-		// Main agent should have an "Identity Settings" button, not Edit/Delete
-		await expect(mainCard.getByRole("button", { name: "Identity Settings", exact: true })).toBeVisible();
-		await expect(mainCard.getByRole("button", { name: "Edit", exact: true })).toHaveCount(0);
+		// Main agent has Edit but no Delete (cannot delete the main agent)
+		await expect(mainCard.getByRole("button", { name: "Edit", exact: true })).toBeVisible();
 		await expect(mainCard.getByRole("button", { name: "Delete", exact: true })).toHaveCount(0);
 
 		expect(pageErrors).toEqual([]);
@@ -75,6 +161,83 @@ test.describe("Agents settings page", () => {
 		await expect(page.getByPlaceholder("Creative Writer")).toBeVisible();
 		await expect(page.getByRole("button", { name: "Create", exact: true })).toBeVisible();
 		await expect(page.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
+
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("config-only preset can be promoted into an agent", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/settings/agents");
+		await waitForWsConnected(page);
+		await sendRpcFromPage(page, "agents.delete", { id: "coder" });
+		await navigateAndWait(page, "/settings/agents");
+		await waitForWsConnected(page);
+
+		await page.getByRole("tab", { name: /Sub-Agents/ }).click();
+		await expect(page.getByRole("heading", { name: "Sub-Agent Presets", exact: true })).toBeVisible({
+			timeout: 10_000,
+		});
+		await expect(page.getByText("usable by spawn_agent", { exact: false })).toBeVisible();
+		const presetCard = page
+			.locator(".backend-card")
+			.filter({ hasText: "Coder" })
+			.filter({ hasText: "Built-in" })
+			.first();
+		await expect(presetCard).toBeVisible({ timeout: 10_000 });
+		await presetCard.getByRole("button", { name: "Add to Chat", exact: true }).click();
+		await expect(presetCard).toHaveCount(0, { timeout: 10_000 });
+		await page.getByRole("tab", { name: /Chat Agents/ }).click();
+
+		const agentCard = page
+			.locator(".backend-card")
+			.filter({ hasText: "Coder" })
+			.filter({ has: page.getByRole("button", { name: "Edit", exact: true }) })
+			.first();
+		await expect(agentCard).toBeVisible({ timeout: 10_000 });
+
+		try {
+			await agentCard.getByRole("button", { name: "Edit", exact: true }).click();
+			await expect(page.getByText("Edit Coder", { exact: true })).toBeVisible({ timeout: 10_000 });
+			await expect(page.locator("textarea").first()).toHaveValue(/Implement scoped code changes/);
+			await page.getByRole("button", { name: "Cancel", exact: true }).click();
+		} finally {
+			await deleteAgentByName(page, "Coder");
+		}
+
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("sub-agent preset can be created edited and deleted", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/settings/agents");
+		await waitForWsConnected(page);
+		await sendRpcFromPage(page, "agents.preset.delete", { id: "e2e-sub-agent" });
+
+		await page.getByRole("tab", { name: /Sub-Agents/ }).click();
+		await page.getByRole("button", { name: "New Sub-Agent", exact: true }).click();
+		await expect(page.getByText("Create Sub-Agent", { exact: true })).toBeVisible();
+		await page.getByPlaceholder("e.g. researcher, reviewer, qa-helper").fill("e2e-sub-agent");
+		await page.getByPlaceholder("Research Specialist").fill("E2E Sub Agent");
+		await page
+			.getByPlaceholder("Give this sub-agent a focused role and constraints...")
+			.fill("Answer with concise evidence.");
+		await page.getByPlaceholder("Read, Glob, Grep, web_search").fill("Read, Grep");
+		await page.getByRole("button", { name: "Create", exact: true }).click();
+
+		const presetCard = page.locator(".backend-card").filter({ hasText: "E2E Sub Agent" });
+		await expect(presetCard).toBeVisible({ timeout: 10_000 });
+		await expect(presetCard.getByText("Custom", { exact: true })).toBeVisible();
+
+		await presetCard.getByRole("button", { name: "Edit", exact: true }).click();
+		await expect(page.getByText("Edit E2E Sub Agent", { exact: true })).toBeVisible();
+		await page.getByPlaceholder("Research Specialist").fill("E2E Edited Sub Agent");
+		await page.getByRole("button", { name: "Save", exact: true }).click();
+		const editedCard = page.locator(".backend-card").filter({ hasText: "E2E Edited Sub Agent" });
+		await expect(editedCard).toBeVisible({ timeout: 10_000 });
+
+		await editedCard.getByRole("button", { name: "Delete", exact: true }).click();
+		await page.locator(".provider-modal").getByRole("button", { name: "Delete", exact: true }).click();
+		await expect(editedCard).toHaveCount(0, { timeout: 10_000 });
 
 		expect(pageErrors).toEqual([]);
 	});
@@ -200,6 +363,74 @@ test.describe("Agents settings page", () => {
 		expect(pageErrors).toEqual([]);
 	});
 
+	test("external-agent binding RPC binds and unbinds a session", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await mockExternalAgentsRpc(page);
+		await page.goto("/chats");
+		await expectPageContentMounted(page);
+		await waitForWsConnected(page);
+		await createSession(page);
+
+		const sessionKey = await page.evaluate(() => window.__moltis_stores?.sessionStore?.activeSessionKey?.value || "");
+		const bindResponse = await sendRpcFromPage(page, "external_agents.bind", { sessionKey, kind: "codex" });
+		expect(bindResponse?.ok).toBe(true);
+		await expect
+			.poll(
+				async () =>
+					page.evaluate(() =>
+						(window.__externalAgentE2ERequests || []).some(
+							(req) => req.method === "external_agents.bind" && req.params?.kind === "codex",
+						),
+					),
+				{ timeout: 10_000 },
+			)
+			.toBe(true);
+		await expectActiveSessionExternalAgent(page, "codex");
+
+		const unbindResponse = await sendRpcFromPage(page, "external_agents.unbind", { sessionKey });
+		expect(unbindResponse?.ok).toBe(true);
+		await expect
+			.poll(
+				async () =>
+					page.evaluate(
+						(key) =>
+							(window.__externalAgentE2ERequests || []).some(
+								(req) => req.method === "external_agents.unbind" && req.params?.sessionKey === key,
+							),
+						sessionKey,
+					),
+				{ timeout: 10_000 },
+			)
+			.toBe(true);
+		await expectActiveSessionExternalAgent(page, null);
+
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("external-agent picker is hidden when external agents are disabled", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await mockExternalAgentsRpc(page, []);
+		await page.goto("/chats");
+		await expectPageContentMounted(page);
+		await waitForWsConnected(page);
+		await createSession(page);
+
+		await expect
+			.poll(
+				async () =>
+					page.evaluate(() =>
+						(window.__externalAgentE2ERequests || []).some((req) => req.method === "external_agents.list"),
+					),
+				{ timeout: 10_000 },
+			)
+			.toBe(true);
+		await expect(page.getByTestId("external-agent-picker")).toHaveCount(0);
+		await expect(page.getByText("Claude Code (unavailable)", { exact: true })).toHaveCount(0);
+		await expect(page.getByText("Codex", { exact: true })).toHaveCount(0);
+
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("create form validates required fields", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 		await navigateAndWait(page, "/settings/agents");
@@ -219,15 +450,50 @@ test.describe("Agents settings page", () => {
 		expect(pageErrors).toEqual([]);
 	});
 
-	test("Identity Settings button on main agent navigates to identity page", async ({ page }) => {
+	test("Edit button on main agent opens edit form", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 		await navigateAndWait(page, "/settings/agents");
 
 		const mainCard = page.locator(".backend-card").filter({ hasText: "Default" });
-		await mainCard.getByRole("button", { name: "Identity Settings", exact: true }).click();
+		await mainCard.getByRole("button", { name: "Edit", exact: true }).click();
 
-		await expect(page).toHaveURL(/\/settings\/identity$/);
-		await expectPageContentMounted(page);
+		// The edit form should appear (heading begins with "Edit")
+		await expect(page.getByText(/^Edit\s/, { exact: false })).toBeVisible({ timeout: 10_000 });
+
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("shows workspace prompt truncation warning when AGENTS.md exceeds the cap", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/settings/agents");
+		await waitForWsConnected(page);
+
+		const originalResponse = await sendRpcFromPage(page, "agents.files.get", {
+			agent_id: "main",
+			path: "AGENTS.md",
+		});
+		const originalContent = originalResponse?.ok ? originalResponse.payload?.content || "" : "";
+		const oversizedContent = `${"A".repeat(32_050)}\n`;
+
+		try {
+			const setResponse = await sendRpcFromPage(page, "agents.files.set", {
+				agent_id: "main",
+				path: "AGENTS.md",
+				content: oversizedContent,
+			});
+			expect(setResponse?.ok).toBe(true);
+
+			await navigateAndWait(page, "/settings/agents");
+			const mainCard = page.locator(".backend-card").filter({ hasText: "Default" });
+			await expect(mainCard).toContainText("AGENTS.md", { timeout: 10_000 });
+			await expect(mainCard).toContainText("truncated by", { timeout: 10_000 });
+		} finally {
+			await sendRpcFromPage(page, "agents.files.set", {
+				agent_id: "main",
+				path: "AGENTS.md",
+				content: originalContent,
+			});
+		}
 
 		expect(pageErrors).toEqual([]);
 	});
