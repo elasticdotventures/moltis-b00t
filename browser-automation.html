@@ -1,193 +1,15 @@
-<!DOCTYPE HTML>
-<html lang="en" class="light sidebar-visible" dir="ltr">
-    <head>
-        <!-- Book generated using mdBook -->
-        <meta charset="UTF-8">
-        <title>Browser Automation - Moltis Documentation</title>
-
-
-        <!-- Custom HTML head -->
-
-        <meta name="description" content="Documentation for Moltis - Your AI coding assistant">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <meta name="theme-color" content="#ffffff">
-
-        <link rel="icon" href="favicon.svg">
-        <link rel="shortcut icon" href="favicon.png">
-        <link rel="stylesheet" href="css/variables.css">
-        <link rel="stylesheet" href="css/general.css">
-        <link rel="stylesheet" href="css/chrome.css">
-        <link rel="stylesheet" href="css/print.css" media="print">
-
-        <!-- Fonts -->
-        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
-        <link rel="stylesheet" href="fonts/fonts.css">
-
-        <!-- Highlight.js Stylesheets -->
-        <link rel="stylesheet" id="highlight-css" href="highlight.css">
-        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
-        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
-
-        <!-- Custom theme stylesheets -->
-        <link rel="stylesheet" href="theme/admonish.css">
-        <link rel="stylesheet" href="theme/custom.css">
-
-
-        <!-- Provide site root and default themes to javascript -->
-        <script>
-            const path_to_root = "";
-            const default_light_theme = "light";
-            const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex.js";
-        </script>
-        <!-- Start loading toc.js asap -->
-        <script src="toc.js"></script>
-    </head>
-    <body>
-    <div id="mdbook-help-container">
-        <div id="mdbook-help-popup">
-            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
-            <div>
-                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
-                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
-                <p>Press <kbd>?</kbd> to show this help</p>
-                <p>Press <kbd>Esc</kbd> to hide this help</p>
-            </div>
-        </div>
-    </div>
-    <div id="body-container">
-        <!-- Work around some values being stored in localStorage wrapped in quotes -->
-        <script>
-            try {
-                let theme = localStorage.getItem('mdbook-theme');
-                let sidebar = localStorage.getItem('mdbook-sidebar');
-
-                if (theme.startsWith('"') && theme.endsWith('"')) {
-                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
-                }
-
-                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
-                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
-                }
-            } catch (e) { }
-        </script>
-
-        <!-- Set the theme before any content is loaded, prevents flash -->
-        <script>
-            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
-            let theme;
-            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
-            if (theme === null || theme === undefined) { theme = default_theme; }
-            const html = document.documentElement;
-            html.classList.remove('light')
-            html.classList.add(theme);
-            html.classList.add("js");
-        </script>
-
-        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
-
-        <!-- Hide / unhide sidebar before it is displayed -->
-        <script>
-            let sidebar = null;
-            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
-            if (document.body.clientWidth >= 1080) {
-                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
-                sidebar = sidebar || 'visible';
-            } else {
-                sidebar = 'hidden';
-                sidebar_toggle.checked = false;
-            }
-            if (sidebar === 'visible') {
-                sidebar_toggle.checked = true;
-            } else {
-                html.classList.remove('sidebar-visible');
-            }
-        </script>
-
-        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
-            <!-- populated by js -->
-            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
-            <noscript>
-                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
-            </noscript>
-            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
-                <div class="sidebar-resize-indicator"></div>
-            </div>
-        </nav>
-
-        <div id="page-wrapper" class="page-wrapper">
-
-            <div class="page">
-                <div id="menu-bar-hover-placeholder"></div>
-                <div id="menu-bar" class="menu-bar sticky">
-                    <div class="left-buttons">
-                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
-                            <i class="fa fa-bars"></i>
-                        </label>
-                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
-                            <i class="fa fa-paint-brush"></i>
-                        </button>
-                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
-                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
-                        </ul>
-                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
-                            <i class="fa fa-search"></i>
-                        </button>
-                    </div>
-
-                    <h1 class="menu-title">Moltis Documentation</h1>
-
-                    <div class="right-buttons">
-                        <a href="print.html" title="Print this book" aria-label="Print this book">
-                            <i id="print-button" class="fa fa-print"></i>
-                        </a>
-                        <a href="https://github.com/moltis-org/moltis" title="Git repository" aria-label="Git repository">
-                            <i id="git-repository-button" class="fa fa-github"></i>
-                        </a>
-                        <a href="https://github.com/moltis-org/moltis/edit/main/docs/src/src/browser-automation.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
-                            <i id="git-edit-button" class="fa fa-edit"></i>
-                        </a>
-
-                    </div>
-                </div>
-
-                <div id="search-wrapper" class="hidden">
-                    <form id="searchbar-outer" class="searchbar-outer">
-                        <div class="search-wrapper">
-                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
-                            <div class="spinner-wrapper">
-                                <i class="fa fa-spinner fa-spin"></i>
-                            </div>
-                        </div>
-                    </form>
-                    <div id="searchresults-outer" class="searchresults-outer hidden">
-                        <div id="searchresults-header" class="searchresults-header"></div>
-                        <ul id="searchresults">
-                        </ul>
-                    </div>
-                </div>
-
-                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
-                <script>
-                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
-                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
-                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
-                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
-                    });
-                </script>
-
-                <div id="content" class="content">
-                    <main>
-                        <h1 id="browser-automation"><a class="header" href="#browser-automation">Browser Automation</a></h1>
+<!DOCTYPE html><html lang="en" data-theme="light" data-theme-choice="auto"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Documentation for Moltis, a secure persistent personal agent server."><meta name="theme-color" content="#f7f7f5"><title>Browser Automation - Moltis Docs</title><script>
+      const storedTheme = localStorage.getItem('moltis-docs-theme') || 'auto'
+      const media = window.matchMedia('(prefers-color-scheme: dark)')
+      const resolvedTheme = storedTheme === 'auto' ? (media.matches ? 'dark' : 'light') : storedTheme
+      document.documentElement.dataset.theme = resolvedTheme
+      document.documentElement.dataset.themeChoice = storedTheme
+      document.querySelector('meta[name="theme-color"]')?.setAttribute('content', resolvedTheme === 'dark' ? '#111214' : '#f7f7f5')
+    </script><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:opsz,wght@14..32,400;500;600;700;800;900&display=swap" rel="stylesheet"><link rel="stylesheet" href="/_astro/Docs.Bz4jgX_X.css"></head> <body>  <div class="site-shell"> <header class="topbar"> <button class="nav-toggle" type="button" aria-label="Open navigation" aria-expanded="false"> <span></span> <span></span> <span></span> </button> <a class="brand" href="/index.html" aria-label="Moltis documentation home"> <img class="brand-mark" src="/moltis-icon.svg" alt="" width="30" height="30" aria-hidden="true"> <span>Moltis</span> </a> <nav class="topnav" aria-label="Primary"> <a href="/quickstart.html">Quickstart</a> <a href="/providers.html">Providers</a> <a href="/security.html">Security</a> <a href="https://github.com/moltis-org/moltis">GitHub</a> </nav> <div class="theme-toggle" role="group" aria-label="Theme"> <button type="button" data-theme-option="auto" aria-label="Use system theme">A</button> <button type="button" data-theme-option="light" aria-label="Use light theme"> <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v3M12 19v3M4.93 4.93l2.12 2.12M16.95 16.95l2.12 2.12M2 12h3M19 12h3M4.93 19.07l2.12-2.12M16.95 7.05l2.12-2.12"></path></svg> </button> <button type="button" data-theme-option="dark" aria-label="Use dark theme"> <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A7.5 7.5 0 0 1 9.5 4 8.5 8.5 0 1 0 20 14.5Z"></path></svg> </button> </div> </header> <div class="mobile-scrim"></div> <aside class="sidebar" aria-label="Documentation navigation"> <div class="sidebar-search"> <label class="search-label" for="docs-search">Search docs</label> <input id="docs-search" type="search" placeholder="Search pages..." autocomplete="off"> <div id="search-results" class="search-results" hidden></div> </div> <section class="sidebar-section"> <h2>Start</h2> <ol> <li class="depth-0"> <a href="/index.html">Introduction</a> </li> </ol> </section><section class="sidebar-section"> <h2>Getting Started</h2> <ol> <li class="depth-0"> <a href="/quickstart.html">Quickstart</a> </li><li class="depth-0"> <a href="/installation.html">Installation</a> </li><li class="depth-0"> <a href="/comparison.html">Comparison</a> </li><li class="depth-0"> <a href="/configuration.html">Configuration</a> </li><li class="depth-1"> <a href="/upstream-proxy.html">Upstream Proxy</a> </li><li class="depth-1"> <a href="/configuration-reference.html">Configuration Reference</a> </li><li class="depth-0"> <a href="/local-validation.html">Local Validation</a> </li><li class="depth-0"> <a href="/e2e-testing.html">End-to-End Testing</a> </li> </ol> </section><section class="sidebar-section"> <h2>Features</h2> <ol> <li class="depth-0"> <a href="/providers.html">LLM Providers</a> </li><li class="depth-1"> <a href="/choosing-a-provider.html">Choosing a Provider</a> </li><li class="depth-1"> <a href="/anthropic-oauth.html">Anthropic OAuth (FAQ)</a> </li><li class="depth-0"> <a href="/mcp.html">MCP Servers</a> </li><li class="depth-0"> <a href="/external-agents.html">External Agents</a> </li><li class="depth-0"> <a href="/memory.html">Memory</a> </li><li class="depth-1"> <a href="/memory-surfaces.html">Memory Surfaces</a> </li><li class="depth-1"> <a href="/memory-comparison.html">Moltis vs OpenClaw</a> </li><li class="depth-0"> <a href="/hooks.html">Hooks</a> </li><li class="depth-0"> <a href="/local-llm.html">Local LLMs</a> </li><li class="depth-0"> <a href="/sandbox.html">Sandbox</a> </li><li class="depth-1"> <a href="/trusted-network.html">Trusted Network</a> </li><li class="depth-0"> <a href="/voice.html">Voice</a> </li><li class="depth-0"> <a href="/remote-access.html">Remote Access</a> </li><li class="depth-0"> <a href="/channels.html">Channels</a> </li><li class="depth-1"> <a href="/telegram.html">Telegram</a> </li><li class="depth-1"> <a href="/teams.html">Microsoft Teams</a> </li><li class="depth-1"> <a href="/discord.html">Discord</a> </li><li class="depth-1"> <a href="/slack.html">Slack</a> </li><li class="depth-1"> <a href="/matrix.html">Matrix</a> </li><li class="depth-1"> <a href="/whatsapp.html">WhatsApp</a> </li><li class="depth-1"> <a href="/nostr.html">Nostr</a> </li><li class="depth-1"> <a href="/signal.html">Signal</a> </li><li class="depth-1"> <a href="/channels/telephony.html">Telephony (Phone Calls)</a> </li><li class="depth-0"> <a class="active" href="/browser-automation.html">Browser Automation</a> </li><li class="depth-0"> <a href="/caldav.html">CalDAV (Calendars)</a> </li><li class="depth-0"> <a href="/graphql.html">GraphQL API</a> </li><li class="depth-0"> <a href="/session-state.html">Session State</a> </li><li class="depth-0"> <a href="/commands.html">Slash Commands</a> </li><li class="depth-0"> <a href="/modes.html">Modes</a> </li><li class="depth-0"> <a href="/session-branching.html">Session Branching</a> </li><li class="depth-0"> <a href="/checkpoints.html">Checkpoints</a> </li><li class="depth-0"> <a href="/compaction.html">Compaction</a> </li><li class="depth-0"> <a href="/tools-fs.html">Filesystem Tools</a> </li><li class="depth-0"> <a href="/scheduling.html">Scheduling (Cron Jobs)</a> </li><li class="depth-0"> <a href="/webhooks.html">Webhooks</a> </li><li class="depth-0"> <a href="/skill-tools.html">Skill Self-Extension</a> </li><li class="depth-0"> <a href="/mobile-pwa.html">Mobile PWA</a> </li><li class="depth-0"> <a href="/native-swift-embedding.html">Native Swift Embedding (POC)</a> </li><li class="depth-0"> <a href="/macos-app-ffi-bridge.html">macOS App FFI Bridge (WIP)</a> </li><li class="depth-0"> <a href="/openclaw-import.html">OpenClaw Import</a> </li><li class="depth-0"> <a href="/nodes.html">Multi-Node</a> </li><li class="depth-0"> <a href="/service.html">Service Management</a> </li> </ol> </section><section class="sidebar-section"> <h2>Security</h2> <ol> <li class="depth-0"> <a href="/authentication.html">Authentication</a> </li><li class="depth-0"> <a href="/vault.html">Encryption at Rest (Vault)</a> </li><li class="depth-0"> <a href="/security.html">Security Architecture</a> </li><li class="depth-0"> <a href="/skills-security.html">Third-Party Skills Security</a> </li><li class="depth-0"> <a href="/release-verification.html">Release Verification</a> </li> </ol> </section><section class="sidebar-section"> <h2>Deployment</h2> <ol> <li class="depth-0"> <a href="/docker.html">Docker</a> </li><li class="depth-0"> <a href="/cloud-deploy.html">Cloud Deploy</a> </li><li class="depth-0"> <a href="/sandbox-remote.html">Remote Sandboxes</a> </li><li class="depth-0"> <a href="/deploy-vps.html">VPS Deployment</a> </li> </ol> </section><section class="sidebar-section"> <h2>Architecture</h2> <ol> <li class="depth-0"> <a href="/system-prompt.html">System Prompt</a> </li><li class="depth-0"> <a href="/frontend.html">Frontend</a> </li><li class="depth-0"> <a href="/streaming.html">Streaming</a> </li><li class="depth-0"> <a href="/sqlite-migration.html">SQLite Migrations</a> </li><li class="depth-0"> <a href="/metrics-and-tracing.html">Metrics &amp; Tracing</a> </li><li class="depth-0"> <a href="/tool-registry.html">Tool Registry</a> </li><li class="depth-0"> <a href="/tool-policy.html">Tool Policy</a> </li><li class="depth-0"> <a href="/agent-presets.html">Agent Presets</a> </li><li class="depth-0"> <a href="/session-tools.html">Session Tools</a> </li> </ol> </section><section class="sidebar-section"> <h2>Reference</h2> <ol> <li class="depth-0"> <a href="/changelog.html">Changelog</a> </li> </ol> </section> </aside> <main class="page-grid"> <article class="content-card"> <div class="eyebrow">Features</div>  <h1 id="browser-automation">Browser Automation</h1>
 <p>Moltis provides full browser automation via Chrome DevTools Protocol (CDP),
 enabling agents to interact with JavaScript-heavy websites, fill forms,
 click buttons, and capture screenshots.</p>
-<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<h2 id="overview">Overview</h2>
 <p>Browser automation is useful when you need to:</p>
 <ul>
 <li>Interact with SPAs (Single Page Applications)</li>
@@ -199,8 +21,8 @@ click buttons, and capture screenshots.</p>
 </ul>
 <p>For simple page content retrieval (static HTML), prefer <code>web_fetch</code> as it’s
 faster and more lightweight.</p>
-<h2 id="architecture"><a class="header" href="#architecture">Architecture</a></h2>
-<pre><code>┌─────────────────┐     ┌─────────────────┐     ┌──────────────────┐
+<h2 id="architecture">Architecture</h2>
+<pre class="astro-code astro-code-themes min-light github-dark" style="background-color:#ffffff;--shiki-dark-bg:#24292e;color:#24292eff;--shiki-dark:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="plaintext" data-code="┌─────────────────┐     ┌─────────────────┐     ┌──────────────────┐
 │   BrowserTool   │────▶│  BrowserManager │────▶│   BrowserPool    │
 │   (AgentTool)   │     │   (actions)     │     │   (instances)    │
 └─────────────────┘     └─────────────────┘     └──────────────────┘
@@ -209,18 +31,26 @@ faster and more lightweight.</p>
                                                 ┌──────────────────┐
                                                 │  Chrome/Chromium │
                                                 │     via CDP      │
-                                                └──────────────────┘
-</code></pre>
-<h3 id="components"><a class="header" href="#components">Components</a></h3>
+                                                └──────────────────┘"><code><span class="line"><span>┌─────────────────┐     ┌─────────────────┐     ┌──────────────────┐</span></span>
+<span class="line"><span>│   BrowserTool   │────▶│  BrowserManager │────▶│   BrowserPool    │</span></span>
+<span class="line"><span>│   (AgentTool)   │     │   (actions)     │     │   (instances)    │</span></span>
+<span class="line"><span>└─────────────────┘     └─────────────────┘     └──────────────────┘</span></span>
+<span class="line"><span>                                                         │</span></span>
+<span class="line"><span>                                                         ▼</span></span>
+<span class="line"><span>                                                ┌──────────────────┐</span></span>
+<span class="line"><span>                                                │  Chrome/Chromium │</span></span>
+<span class="line"><span>                                                │     via CDP      │</span></span>
+<span class="line"><span>                                                └──────────────────┘</span></span></code></pre>
+<h3 id="components">Components</h3>
 <ul>
 <li><strong>BrowserTool</strong> (<code>crates/tools/src/browser.rs</code>) - AgentTool wrapper for LLM</li>
 <li><strong>BrowserManager</strong> (<code>crates/browser/src/manager.rs</code>) - High-level action API</li>
 <li><strong>BrowserPool</strong> (<code>crates/browser/src/pool.rs</code>) - Chrome instance management</li>
 <li><strong>Snapshot</strong> (<code>crates/browser/src/snapshot.rs</code>) - DOM element extraction</li>
 </ul>
-<h2 id="configuration"><a class="header" href="#configuration">Configuration</a></h2>
+<h2 id="configuration">Configuration</h2>
 <p>Browser automation is <strong>enabled by default</strong>. To customize, add to your <code>moltis.toml</code>:</p>
-<pre><code class="language-toml">[tools.browser]
+<pre class="astro-code astro-code-themes min-light github-dark" style="background-color:#ffffff;--shiki-dark-bg:#24292e;color:#24292eff;--shiki-dark:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="toml" data-code="[tools.browser]
 enabled = true              # Enable browser support
 headless = true             # Run without visible window (default)
 viewport_width = 2560       # Default viewport width
@@ -228,138 +58,289 @@ viewport_height = 1440      # Default viewport height
 device_scale_factor = 2.0   # HiDPI/Retina scaling (1.0 = standard, 2.0 = Retina)
 
 # Pool management
-max_instances = 0           # 0 = unlimited (limited by memory), &gt;0 = hard limit
+max_instances = 0           # 0 = unlimited (limited by memory), >0 = hard limit
 memory_limit_percent = 90   # Block new instances when memory exceeds this %
 idle_timeout_secs = 300     # Close idle browsers after 5 min
 navigation_timeout_ms = 30000  # Page load timeout
 
 # Optional customization
-# chrome_path = "/path/to/chrome"  # Custom Chrome path
-# user_agent = "Custom UA"         # Custom user agent
-# chrome_args = ["--disable-extensions"]  # Extra args
+# chrome_path = &#x22;/path/to/chrome&#x22;  # Custom Chrome path
+# obscura_path = &#x22;/path/to/obscura&#x22;  # Custom Obscura path
+# lightpanda_path = &#x22;/path/to/lightpanda&#x22;  # Custom Lightpanda path
+# user_agent = &#x22;Custom UA&#x22;         # Custom user agent
+# chrome_args = [&#x22;--disable-extensions&#x22;]  # Extra args
 
 # Sandbox image (browser sandbox mode follows session sandbox mode)
-sandbox_image = "browserless/chrome"  # Container image for sandboxed sessions
-# allowed_domains = ["example.com", "*.trusted.org"]  # Restrict navigation
+sandbox_image = &#x22;docker.io/browserless/chrome&#x22;  # Container image for sandboxed sessions
+# allowed_domains = [&#x22;example.com&#x22;, &#x22;*.trusted.org&#x22;]  # Restrict navigation
 
 # Container connectivity (for Moltis-in-Docker setups)
-# container_host = "127.0.0.1"  # Default; change when Moltis runs inside Docker
-</code></pre>
-<h3 id="memory-based-pool-limits"><a class="header" href="#memory-based-pool-limits">Memory-Based Pool Limits</a></h3>
+# container_host = &#x22;127.0.0.1&#x22;  # Default; change when Moltis runs inside Docker"><code><span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">[</span><span style="color:#24292EFF;--shiki-dark:#B392F0">tools</span><span style="color:#24292EFF;--shiki-dark:#E1E4E8">.</span><span style="color:#24292EFF;--shiki-dark:#B392F0">browser</span><span style="color:#24292EFF;--shiki-dark:#E1E4E8">]</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">enabled </span><span style="color:#D32F2F;--shiki-dark:#E1E4E8">=</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> true</span><span style="color:#C2C3C5;--shiki-dark:#6A737D">              # Enable browser support</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">headless </span><span style="color:#D32F2F;--shiki-dark:#E1E4E8">=</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> true</span><span style="color:#C2C3C5;--shiki-dark:#6A737D">             # Run without visible window (default)</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">viewport_width </span><span style="color:#D32F2F;--shiki-dark:#E1E4E8">=</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> 2560</span><span style="color:#C2C3C5;--shiki-dark:#6A737D">       # Default viewport width</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">viewport_height </span><span style="color:#D32F2F;--shiki-dark:#E1E4E8">=</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> 1440</span><span style="color:#C2C3C5;--shiki-dark:#6A737D">      # Default viewport height</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">device_scale_factor </span><span style="color:#D32F2F;--shiki-dark:#E1E4E8">=</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> 2.0</span><span style="color:#C2C3C5;--shiki-dark:#6A737D">   # HiDPI/Retina scaling (1.0 = standard, 2.0 = Retina)</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D"># Pool management</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">max_instances </span><span style="color:#D32F2F;--shiki-dark:#E1E4E8">=</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> 0</span><span style="color:#C2C3C5;--shiki-dark:#6A737D">           # 0 = unlimited (limited by memory), >0 = hard limit</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">memory_limit_percent </span><span style="color:#D32F2F;--shiki-dark:#E1E4E8">=</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> 90</span><span style="color:#C2C3C5;--shiki-dark:#6A737D">   # Block new instances when memory exceeds this %</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">idle_timeout_secs </span><span style="color:#D32F2F;--shiki-dark:#E1E4E8">=</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> 300</span><span style="color:#C2C3C5;--shiki-dark:#6A737D">     # Close idle browsers after 5 min</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">navigation_timeout_ms </span><span style="color:#D32F2F;--shiki-dark:#E1E4E8">=</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> 30000</span><span style="color:#C2C3C5;--shiki-dark:#6A737D">  # Page load timeout</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D"># Optional customization</span></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D"># chrome_path = "/path/to/chrome"  # Custom Chrome path</span></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D"># obscura_path = "/path/to/obscura"  # Custom Obscura path</span></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D"># lightpanda_path = "/path/to/lightpanda"  # Custom Lightpanda path</span></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D"># user_agent = "Custom UA"         # Custom user agent</span></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D"># chrome_args = ["--disable-extensions"]  # Extra args</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D"># Sandbox image (browser sandbox mode follows session sandbox mode)</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">sandbox_image </span><span style="color:#D32F2F;--shiki-dark:#E1E4E8">=</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "docker.io/browserless/chrome"</span><span style="color:#C2C3C5;--shiki-dark:#6A737D">  # Container image for sandboxed sessions</span></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D"># allowed_domains = ["example.com", "*.trusted.org"]  # Restrict navigation</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D"># Container connectivity (for Moltis-in-Docker setups)</span></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D"># container_host = "127.0.0.1"  # Default; change when Moltis runs inside Docker</span></span></code></pre>
+<h3 id="memory-based-pool-limits">Memory-Based Pool Limits</h3>
 <p>By default, browser instances are limited by system memory rather than a fixed count:</p>
 <ul>
 <li><code>max_instances = 0</code> (default): Unlimited instances, blocked only when memory
 exceeds <code>memory_limit_percent</code></li>
-<li><code>memory_limit_percent = 90</code>: New browsers blocked when system memory &gt; 90%</li>
-<li>Set <code>max_instances &gt; 0</code> for a hard limit if you prefer fixed constraints</li>
+<li><code>memory_limit_percent = 90</code>: New browsers blocked when system memory > 90%</li>
+<li>Set <code>max_instances > 0</code> for a hard limit if you prefer fixed constraints</li>
 </ul>
 <p>This allows multiple chat sessions to each have their own browser without
 artificial limits, while protecting system stability when memory is constrained.</p>
-<h3 id="domain-restrictions"><a class="header" href="#domain-restrictions">Domain Restrictions</a></h3>
+<h3 id="domain-restrictions">Domain Restrictions</h3>
 <p>For improved security, you can restrict which domains the browser can navigate to:</p>
-<pre><code class="language-toml">[tools.browser]
+<pre class="astro-code astro-code-themes min-light github-dark" style="background-color:#ffffff;--shiki-dark-bg:#24292e;color:#24292eff;--shiki-dark:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="toml" data-code="[tools.browser]
 allowed_domains = [
-    "docs.example.com",    # Exact match
-    "*.github.com",        # Wildcard: matches any subdomain
-    "localhost",           # Allow localhost
-]
-</code></pre>
+    &#x22;docs.example.com&#x22;,    # Exact match
+    &#x22;*.github.com&#x22;,        # Wildcard: matches any subdomain
+    &#x22;localhost&#x22;,           # Allow localhost
+]"><code><span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">[</span><span style="color:#24292EFF;--shiki-dark:#B392F0">tools</span><span style="color:#24292EFF;--shiki-dark:#E1E4E8">.</span><span style="color:#24292EFF;--shiki-dark:#B392F0">browser</span><span style="color:#24292EFF;--shiki-dark:#E1E4E8">]</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">allowed_domains </span><span style="color:#D32F2F;--shiki-dark:#E1E4E8">=</span><span style="color:#24292EFF;--shiki-dark:#E1E4E8"> [</span></span>
+<span class="line"><span style="color:#22863A;--shiki-dark:#9ECBFF">    "docs.example.com"</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span><span style="color:#C2C3C5;--shiki-dark:#6A737D">    # Exact match</span></span>
+<span class="line"><span style="color:#22863A;--shiki-dark:#9ECBFF">    "*.github.com"</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span><span style="color:#C2C3C5;--shiki-dark:#6A737D">        # Wildcard: matches any subdomain</span></span>
+<span class="line"><span style="color:#22863A;--shiki-dark:#9ECBFF">    "localhost"</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span><span style="color:#C2C3C5;--shiki-dark:#6A737D">           # Allow localhost</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">]</span></span></code></pre>
 <p>When <code>allowed_domains</code> is set, any navigation to a domain not in the list will
 be blocked with an error. Wildcards (<code>*.domain.com</code>) match any subdomain and
 also the base domain itself.</p>
-<h2 id="tool-usage"><a class="header" href="#tool-usage">Tool Usage</a></h2>
-<h3 id="actions"><a class="header" href="#actions">Actions</a></h3>
-<div class="table-wrapper"><table><thead><tr><th>Action</th><th>Description</th><th>Required Params</th></tr></thead><tbody>
-<tr><td><code>navigate</code></td><td>Go to a URL</td><td><code>url</code></td></tr>
-<tr><td><code>snapshot</code></td><td>Get DOM with element refs</td><td>-</td></tr>
-<tr><td><code>screenshot</code></td><td>Capture page image</td><td><code>full_page</code> (optional)</td></tr>
-<tr><td><code>click</code></td><td>Click element by ref</td><td><code>ref_</code></td></tr>
-<tr><td><code>type</code></td><td>Type into element</td><td><code>ref_</code>, <code>text</code></td></tr>
-<tr><td><code>scroll</code></td><td>Scroll page/element</td><td><code>x</code>, <code>y</code>, <code>ref_</code> (optional)</td></tr>
-<tr><td><code>evaluate</code></td><td>Run JavaScript</td><td><code>code</code></td></tr>
-<tr><td><code>wait</code></td><td>Wait for element</td><td><code>selector</code> or <code>ref_</code></td></tr>
-<tr><td><code>get_url</code></td><td>Get current URL</td><td>-</td></tr>
-<tr><td><code>get_title</code></td><td>Get page title</td><td>-</td></tr>
-<tr><td><code>back</code></td><td>Go back in history</td><td>-</td></tr>
-<tr><td><code>forward</code></td><td>Go forward in history</td><td>-</td></tr>
-<tr><td><code>refresh</code></td><td>Reload the page</td><td>-</td></tr>
-<tr><td><code>close</code></td><td>Close browser session</td><td>-</td></tr>
-</tbody></table>
-</div>
-<h3 id="automatic-session-tracking"><a class="header" href="#automatic-session-tracking">Automatic Session Tracking</a></h3>
+<h2 id="tool-usage">Tool Usage</h2>
+<h3 id="actions">Actions</h3>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Action</th><th>Description</th><th>Required Params</th></tr></thead><tbody><tr><td><code>navigate</code></td><td>Go to a URL</td><td><code>url</code></td></tr><tr><td><code>snapshot</code></td><td>Get DOM with element refs</td><td>-</td></tr><tr><td><code>screenshot</code></td><td>Capture page image</td><td><code>full_page</code> (optional)</td></tr><tr><td><code>click</code></td><td>Click element by ref</td><td><code>ref_</code></td></tr><tr><td><code>type</code></td><td>Type into element</td><td><code>ref_</code>, <code>text</code></td></tr><tr><td><code>scroll</code></td><td>Scroll page/element</td><td><code>x</code>, <code>y</code>, <code>ref_</code> (optional)</td></tr><tr><td><code>evaluate</code></td><td>Run JavaScript</td><td><code>code</code></td></tr><tr><td><code>wait</code></td><td>Wait for element</td><td><code>selector</code> or <code>ref_</code></td></tr><tr><td><code>get_url</code></td><td>Get current URL</td><td>-</td></tr><tr><td><code>get_title</code></td><td>Get page title</td><td>-</td></tr><tr><td><code>back</code></td><td>Go back in history</td><td>-</td></tr><tr><td><code>forward</code></td><td>Go forward in history</td><td>-</td></tr><tr><td><code>refresh</code></td><td>Reload the page</td><td>-</td></tr><tr><td><code>close</code></td><td>Close browser session</td><td>-</td></tr></tbody></table>
+<h3 id="automatic-session-tracking">Automatic Session Tracking</h3>
 <p>The browser tool automatically tracks and reuses session IDs. After a <code>navigate</code>
 action creates a session, subsequent actions will reuse it without needing to
 pass <code>session_id</code> explicitly:</p>
-<pre><code class="language-json">// 1. Navigate (creates session)
-{ "action": "navigate", "url": "https://example.com" }
+<pre class="astro-code astro-code-themes min-light github-dark" style="background-color:#ffffff;--shiki-dark-bg:#24292e;color:#24292eff;--shiki-dark:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="json" data-code="// 1. Navigate (creates session)
+{ &#x22;action&#x22;: &#x22;navigate&#x22;, &#x22;url&#x22;: &#x22;https://example.com&#x22; }
 
 // 2. Snapshot (session_id auto-injected)
-{ "action": "snapshot" }
+{ &#x22;action&#x22;: &#x22;snapshot&#x22; }
 
 // 3. Click (session_id auto-injected)
-{ "action": "click", "ref_": 1 }
+{ &#x22;action&#x22;: &#x22;click&#x22;, &#x22;ref_&#x22;: 1 }
 
 // 4. Screenshot (session_id auto-injected)
-{ "action": "screenshot" }
+{ &#x22;action&#x22;: &#x22;screenshot&#x22; }
 
 // 5. Close (clears tracked session)
-{ "action": "close" }
-</code></pre>
+{ &#x22;action&#x22;: &#x22;close&#x22; }"><code><span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D">// 1. Navigate (creates session)</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">{ </span><span style="color:#D32F2F;--shiki-dark:#79B8FF">"action"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "navigate"</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span><span style="color:#D32F2F;--shiki-dark:#79B8FF"> "url"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "https://example.com"</span><span style="color:#24292EFF;--shiki-dark:#E1E4E8"> }</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D">// 2. Snapshot (session_id auto-injected)</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">{ </span><span style="color:#D32F2F;--shiki-dark:#79B8FF">"action"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "snapshot"</span><span style="color:#24292EFF;--shiki-dark:#E1E4E8"> }</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D">// 3. Click (session_id auto-injected)</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">{ </span><span style="color:#D32F2F;--shiki-dark:#79B8FF">"action"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "click"</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span><span style="color:#D32F2F;--shiki-dark:#79B8FF"> "ref_"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> 1</span><span style="color:#24292EFF;--shiki-dark:#E1E4E8"> }</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D">// 4. Screenshot (session_id auto-injected)</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">{ </span><span style="color:#D32F2F;--shiki-dark:#79B8FF">"action"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "screenshot"</span><span style="color:#24292EFF;--shiki-dark:#E1E4E8"> }</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D">// 5. Close (clears tracked session)</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">{ </span><span style="color:#D32F2F;--shiki-dark:#79B8FF">"action"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "close"</span><span style="color:#24292EFF;--shiki-dark:#E1E4E8"> }</span></span></code></pre>
 <p>This prevents pool exhaustion from LLMs that forget to pass the session_id.</p>
-<h3 id="browser-selection"><a class="header" href="#browser-selection">Browser selection</a></h3>
+<h3 id="browser-selection">Browser selection</h3>
 <p>You can ask for a specific browser at runtime (host mode):</p>
-<pre><code class="language-json">{ "action": "navigate", "url": "https://example.com", "browser": "brave" }
-</code></pre>
+<pre class="astro-code astro-code-themes min-light github-dark" style="background-color:#ffffff;--shiki-dark-bg:#24292e;color:#24292eff;--shiki-dark:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="json" data-code="{ &#x22;action&#x22;: &#x22;navigate&#x22;, &#x22;url&#x22;: &#x22;https://example.com&#x22;, &#x22;browser&#x22;: &#x22;brave&#x22; }"><code><span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">{ </span><span style="color:#D32F2F;--shiki-dark:#79B8FF">"action"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "navigate"</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span><span style="color:#D32F2F;--shiki-dark:#79B8FF"> "url"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "https://example.com"</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span><span style="color:#D32F2F;--shiki-dark:#79B8FF"> "browser"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "brave"</span><span style="color:#24292EFF;--shiki-dark:#E1E4E8"> }</span></span></code></pre>
 <p>Supported values: <code>auto</code>, <code>chrome</code>, <code>chromium</code>, <code>edge</code>, <code>brave</code>, <code>opera</code>,
-<code>vivaldi</code>, <code>arc</code>.</p>
+<code>vivaldi</code>, <code>arc</code>, <code>obscura</code>, <code>lightpanda</code>.</p>
 <p><code>auto</code> (default) picks the first detected installed browser. If none are
 installed, Moltis will attempt a best-effort auto-install, then retry
 detection.</p>
-<h3 id="workflow-example"><a class="header" href="#workflow-example">Workflow Example</a></h3>
-<pre><code class="language-json">// 1. Navigate to a page
+<p><code>obscura</code> launches the Obscura sidecar binary from <code>obscura_path</code>, the
+<code>OBSCURA</code> environment variable, or <code>PATH</code>. It supports DOM-oriented browsing
+through CDP, but not pixel screenshots.</p>
+<p><code>lightpanda</code> launches the Lightpanda sidecar binary from <code>lightpanda_path</code>, the
+<code>LIGHTPANDA</code> environment variable, or <code>PATH</code>. It supports DOM-oriented browsing
+through CDP, but not pixel screenshots.</p>
+<h3 id="workflow-example">Workflow Example</h3>
+<pre class="astro-code astro-code-themes min-light github-dark" style="background-color:#ffffff;--shiki-dark-bg:#24292e;color:#24292eff;--shiki-dark:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="json" data-code="// 1. Navigate to a page
 {
-  "action": "navigate",
-  "url": "https://example.com/login"
+  &#x22;action&#x22;: &#x22;navigate&#x22;,
+  &#x22;url&#x22;: &#x22;https://example.com/login&#x22;
 }
-// Returns: { "session_id": "browser-abc123", "url": "https://..." }
+// Returns: { &#x22;session_id&#x22;: &#x22;browser-abc123&#x22;, &#x22;url&#x22;: &#x22;https://...&#x22; }
 
 // 2. Get interactive elements (session_id optional - auto-tracked)
 {
-  "action": "snapshot"
+  &#x22;action&#x22;: &#x22;snapshot&#x22;
 }
 // Returns element refs like:
-// { "elements": [
-//   { "ref_": 1, "tag": "input", "role": "textbox", "placeholder": "Email" },
-//   { "ref_": 2, "tag": "input", "role": "textbox", "placeholder": "Password" },
-//   { "ref_": 3, "tag": "button", "role": "button", "text": "Sign In" }
+// { &#x22;elements&#x22;: [
+//   { &#x22;ref_&#x22;: 1, &#x22;tag&#x22;: &#x22;input&#x22;, &#x22;role&#x22;: &#x22;textbox&#x22;, &#x22;placeholder&#x22;: &#x22;Email&#x22; },
+//   { &#x22;ref_&#x22;: 2, &#x22;tag&#x22;: &#x22;input&#x22;, &#x22;role&#x22;: &#x22;textbox&#x22;, &#x22;placeholder&#x22;: &#x22;Password&#x22; },
+//   { &#x22;ref_&#x22;: 3, &#x22;tag&#x22;: &#x22;button&#x22;, &#x22;role&#x22;: &#x22;button&#x22;, &#x22;text&#x22;: &#x22;Sign In&#x22; }
 // ]}
 
 // 3. Fill in the form
 {
-  "action": "type",
-  "ref_": 1,
-  "text": "user@example.com"
+  &#x22;action&#x22;: &#x22;type&#x22;,
+  &#x22;ref_&#x22;: 1,
+  &#x22;text&#x22;: &#x22;user@example.com&#x22;
 }
 
 {
-  "action": "type",
-  "ref_": 2,
-  "text": "password123"
+  &#x22;action&#x22;: &#x22;type&#x22;,
+  &#x22;ref_&#x22;: 2,
+  &#x22;text&#x22;: &#x22;password123&#x22;
 }
 
 // 4. Click the submit button
 {
-  "action": "click",
-  "ref_": 3
+  &#x22;action&#x22;: &#x22;click&#x22;,
+  &#x22;ref_&#x22;: 3
 }
 
 // 5. Take a screenshot of the result
 {
-  "action": "screenshot"
+  &#x22;action&#x22;: &#x22;screenshot&#x22;
 }
-// Returns: { "screenshot": "data:image/png;base64,..." }
-</code></pre>
-<h2 id="element-reference-system"><a class="header" href="#element-reference-system">Element Reference System</a></h2>
+// Returns: { &#x22;screenshot&#x22;: &#x22;data:image/png;base64,...&#x22; }"><code><span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D">// 1. Navigate to a page</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "action"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "navigate"</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "url"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "https://example.com/login"</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">}</span></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D">// Returns: { "session_id": "browser-abc123", "url": "https://..." }</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D">// 2. Get interactive elements (session_id optional - auto-tracked)</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "action"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "snapshot"</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">}</span></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D">// Returns element refs like:</span></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D">// { "elements": [</span></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D">//   { "ref_": 1, "tag": "input", "role": "textbox", "placeholder": "Email" },</span></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D">//   { "ref_": 2, "tag": "input", "role": "textbox", "placeholder": "Password" },</span></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D">//   { "ref_": 3, "tag": "button", "role": "button", "text": "Sign In" }</span></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D">// ]}</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D">// 3. Fill in the form</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "action"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "type"</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "ref_"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> 1</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "text"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "user@example.com"</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">}</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "action"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "type"</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "ref_"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> 2</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "text"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "password123"</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">}</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D">// 4. Click the submit button</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "action"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "click"</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "ref_"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> 3</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">}</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D">// 5. Take a screenshot of the result</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "action"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "screenshot"</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">}</span></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D">// Returns: { "screenshot": "data:image/png;base64,..." }</span></span></code></pre>
+<h2 id="element-reference-system">Element Reference System</h2>
 <p>The snapshot action extracts interactive elements and assigns them numeric
 references. This approach (inspired by <a href="https://docs.openclaw.ai">OpenClaw</a>)
 provides:</p>
@@ -368,32 +349,79 @@ provides:</p>
 <li><strong>Security</strong>: No CSS selectors exposed to the model</li>
 <li><strong>Reliability</strong>: Elements identified by role/content, not fragile paths</li>
 </ul>
-<h3 id="extracted-element-info"><a class="header" href="#extracted-element-info">Extracted Element Info</a></h3>
-<pre><code class="language-json">{
-  "ref_": 1,
-  "tag": "button",
-  "role": "button",
-  "text": "Submit",
-  "href": null,
-  "placeholder": null,
-  "value": null,
-  "aria_label": "Submit form",
-  "visible": true,
-  "interactive": true,
-  "bounds": { "x": 100, "y": 200, "width": 80, "height": 40 }
-}
-</code></pre>
-<h2 id="comparison-browser-vs-web-fetch"><a class="header" href="#comparison-browser-vs-web-fetch">Comparison: Browser vs Web Fetch</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Feature</th><th><code>web_fetch</code></th><th><code>browser</code></th></tr></thead><tbody>
-<tr><td>Speed</td><td>Fast</td><td>Slower</td></tr>
-<tr><td>Resources</td><td>Minimal</td><td>Chrome instance</td></tr>
-<tr><td>JavaScript</td><td>No</td><td>Yes</td></tr>
-<tr><td>Forms/clicks</td><td>No</td><td>Yes</td></tr>
-<tr><td>Screenshots</td><td>No</td><td>Yes</td></tr>
-<tr><td>Sessions</td><td>No</td><td>Yes</td></tr>
-<tr><td>Use case</td><td>Static content</td><td>Interactive sites</td></tr>
-</tbody></table>
-</div>
+<h3 id="extracted-element-info">Extracted Element Info</h3>
+<pre class="astro-code astro-code-themes min-light github-dark" style="background-color:#ffffff;--shiki-dark-bg:#24292e;color:#24292eff;--shiki-dark:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="json" data-code="{
+  &#x22;ref_&#x22;: 1,
+  &#x22;tag&#x22;: &#x22;button&#x22;,
+  &#x22;role&#x22;: &#x22;button&#x22;,
+  &#x22;text&#x22;: &#x22;Submit&#x22;,
+  &#x22;href&#x22;: null,
+  &#x22;placeholder&#x22;: null,
+  &#x22;value&#x22;: null,
+  &#x22;aria_label&#x22;: &#x22;Submit form&#x22;,
+  &#x22;visible&#x22;: true,
+  &#x22;interactive&#x22;: true,
+  &#x22;bounds&#x22;: { &#x22;x&#x22;: 100, &#x22;y&#x22;: 200, &#x22;width&#x22;: 80, &#x22;height&#x22;: 40 }
+}"><code><span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "ref_"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> 1</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "tag"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "button"</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "role"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "button"</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "text"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "Submit"</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "href"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> null</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "placeholder"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> null</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "value"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> null</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "aria_label"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "Submit form"</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "visible"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> true</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "interactive"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> true</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#D32F2F;--shiki-dark:#79B8FF">  "bounds"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#24292EFF;--shiki-dark:#E1E4E8"> { </span><span style="color:#D32F2F;--shiki-dark:#79B8FF">"x"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> 100</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span><span style="color:#D32F2F;--shiki-dark:#79B8FF"> "y"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> 200</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span><span style="color:#D32F2F;--shiki-dark:#79B8FF"> "width"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> 80</span><span style="color:#212121;--shiki-dark:#E1E4E8">,</span><span style="color:#D32F2F;--shiki-dark:#79B8FF"> "height"</span><span style="color:#212121;--shiki-dark:#E1E4E8">:</span><span style="color:#1976D2;--shiki-dark:#79B8FF"> 40</span><span style="color:#24292EFF;--shiki-dark:#E1E4E8"> }</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">}</span></span></code></pre>
+<h2 id="comparison-browser-vs-web-fetch">Comparison: Browser vs Web Fetch</h2>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Feature</th><th><code>web_fetch</code></th><th><code>browser</code></th></tr></thead><tbody><tr><td>Speed</td><td>Fast</td><td>Slower</td></tr><tr><td>Resources</td><td>Minimal</td><td>Chrome instance</td></tr><tr><td>JavaScript</td><td>No</td><td>Yes</td></tr><tr><td>Forms/clicks</td><td>No</td><td>Yes</td></tr><tr><td>Screenshots</td><td>No</td><td>Yes</td></tr><tr><td>Sessions</td><td>No</td><td>Yes</td></tr><tr><td>Use case</td><td>Static content</td><td>Interactive sites</td></tr></tbody></table>
 <p><strong>When to use <code>web_fetch</code>:</strong></p>
 <ul>
 <li>Reading documentation</li>
@@ -408,27 +436,52 @@ provides:</p>
 <li>Sites that require JavaScript</li>
 <li>Taking screenshots</li>
 </ul>
-<h2 id="metrics"><a class="header" href="#metrics">Metrics</a></h2>
+<h2 id="metrics">Metrics</h2>
 <p>When the <code>metrics</code> feature is enabled, the browser module records:</p>
-<div class="table-wrapper"><table><thead><tr><th>Metric</th><th>Description</th></tr></thead><tbody>
-<tr><td><code>moltis_browser_instances_active</code></td><td>Currently running browsers</td></tr>
-<tr><td><code>moltis_browser_instances_created_total</code></td><td>Total browsers launched</td></tr>
-<tr><td><code>moltis_browser_instances_destroyed_total</code></td><td>Total browsers closed</td></tr>
-<tr><td><code>moltis_browser_screenshots_total</code></td><td>Screenshots taken</td></tr>
-<tr><td><code>moltis_browser_navigation_duration_seconds</code></td><td>Page load time histogram</td></tr>
-<tr><td><code>moltis_browser_errors_total</code></td><td>Errors by type</td></tr>
-</tbody></table>
-</div>
-<h2 id="sandbox-mode"><a class="header" href="#sandbox-mode">Sandbox Mode</a></h2>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Metric</th><th>Description</th></tr></thead><tbody><tr><td><code>moltis_browser_instances_active</code></td><td>Currently running browsers</td></tr><tr><td><code>moltis_browser_instances_created_total</code></td><td>Total browsers launched</td></tr><tr><td><code>moltis_browser_instances_destroyed_total</code></td><td>Total browsers closed</td></tr><tr><td><code>moltis_browser_screenshots_total</code></td><td>Screenshots taken</td></tr><tr><td><code>moltis_browser_navigation_duration_seconds</code></td><td>Page load time histogram</td></tr><tr><td><code>moltis_browser_errors_total</code></td><td>Errors by type</td></tr></tbody></table>
+<h2 id="sandbox-mode">Sandbox Mode</h2>
 <p>Browser sandbox mode <strong>automatically follows the session’s sandbox mode</strong>. When
 a chat session uses sandbox mode (controlled by <code>[tools.exec.sandbox]</code>), the
 browser tool will also run in a sandboxed container. When the session is not
 sandboxed, the browser runs directly on the host.</p>
-<h3 id="host-mode"><a class="header" href="#host-mode">Host Mode</a></h3>
+<h3 id="host-mode">Host Mode</h3>
 <p>When the session is not sandboxed (or sandbox mode is “off”), Chrome runs
 directly on the host machine. This is faster but the browser has full access
 to the host network and filesystem.</p>
-<h3 id="sandbox-mode-1"><a class="header" href="#sandbox-mode-1">Sandbox Mode</a></h3>
+<h3 id="sandbox-mode-1">Sandbox Mode</h3>
 <p>When the session is sandboxed, Chrome runs inside a Docker container with:</p>
 <ul>
 <li><strong>Network isolation</strong>: Browser can access the internet but not local services</li>
@@ -436,39 +489,40 @@ to the host network and filesystem.</p>
 <li><strong>Automatic lifecycle</strong>: Container started/stopped with browser session</li>
 <li><strong>Readiness detection</strong>: Waits for Chrome to be fully ready before connecting</li>
 </ul>
-<pre><code class="language-toml">[tools.browser]
-sandbox_image = "browserless/chrome"  # Container image for sandboxed sessions
-</code></pre>
+<pre class="astro-code astro-code-themes min-light github-dark" style="background-color:#ffffff;--shiki-dark-bg:#24292e;color:#24292eff;--shiki-dark:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="toml" data-code="[tools.browser]
+sandbox_image = &#x22;docker.io/browserless/chrome&#x22;  # Container image for sandboxed sessions"><code><span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">[</span><span style="color:#24292EFF;--shiki-dark:#B392F0">tools</span><span style="color:#24292EFF;--shiki-dark:#E1E4E8">.</span><span style="color:#24292EFF;--shiki-dark:#B392F0">browser</span><span style="color:#24292EFF;--shiki-dark:#E1E4E8">]</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">sandbox_image </span><span style="color:#D32F2F;--shiki-dark:#E1E4E8">=</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "docker.io/browserless/chrome"</span><span style="color:#C2C3C5;--shiki-dark:#6A737D">  # Container image for sandboxed sessions</span></span></code></pre>
 <p>Requirements:</p>
 <ul>
 <li>Docker or Apple Container must be installed and running</li>
 <li>The container image is pulled automatically on first use</li>
 <li>Session sandbox mode must be enabled (<code>[tools.exec.sandbox] mode = "all"</code>)</li>
 </ul>
-<h3 id="moltis-inside-docker-sibling-containers"><a class="header" href="#moltis-inside-docker-sibling-containers">Moltis Inside Docker (Sibling Containers)</a></h3>
+<h3 id="moltis-inside-docker-sibling-containers">Moltis Inside Docker (Sibling Containers)</h3>
 <p>When Moltis itself runs inside a Docker container, the browser container is
 launched as a sibling via the host’s Docker socket. By default Moltis connects
 to the browser at <code>127.0.0.1</code>, which points to the Moltis container’s own
 loopback — not the host where the browser port is mapped.</p>
 <p>Set <code>container_host</code> so Moltis can reach the browser container through the
 host’s port mapping:</p>
-<pre><code class="language-toml">[tools.browser]
-container_host = "host.docker.internal"   # macOS / Windows Docker Desktop
-# container_host = "172.17.0.1"           # Linux Docker bridge gateway IP
-</code></pre>
+<pre class="astro-code astro-code-themes min-light github-dark" style="background-color:#ffffff;--shiki-dark-bg:#24292e;color:#24292eff;--shiki-dark:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="toml" data-code="[tools.browser]
+container_host = &#x22;host.docker.internal&#x22;   # macOS / Windows Docker Desktop
+# container_host = &#x22;172.17.0.1&#x22;           # Linux Docker bridge gateway IP"><code><span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">[</span><span style="color:#24292EFF;--shiki-dark:#B392F0">tools</span><span style="color:#24292EFF;--shiki-dark:#E1E4E8">.</span><span style="color:#24292EFF;--shiki-dark:#B392F0">browser</span><span style="color:#24292EFF;--shiki-dark:#E1E4E8">]</span></span>
+<span class="line"><span style="color:#24292EFF;--shiki-dark:#E1E4E8">container_host </span><span style="color:#D32F2F;--shiki-dark:#E1E4E8">=</span><span style="color:#22863A;--shiki-dark:#9ECBFF"> "host.docker.internal"</span><span style="color:#C2C3C5;--shiki-dark:#6A737D">   # macOS / Windows Docker Desktop</span></span>
+<span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D"># container_host = "172.17.0.1"           # Linux Docker bridge gateway IP</span></span></code></pre>
 <p>On Linux, <code>host.docker.internal</code> is not available by default. Use the Docker
 bridge gateway IP (typically <code>172.17.0.1</code>) or add <code>--add-host=host.docker.internal:host-gateway</code>
 to the Moltis container’s <code>docker run</code> command.</p>
-<h3 id="exec-tool-scripts"><a class="header" href="#exec-tool-scripts">Exec Tool Scripts</a></h3>
+<h3 id="exec-tool-scripts">Exec Tool Scripts</h3>
 <p>If agents need to run browser automation <strong>scripts</strong> (Puppeteer, Playwright,
 Selenium) inside the command sandbox, Chromium is included in the default
 sandbox packages:</p>
-<pre><code class="language-bash"># Inside sandbox (via exec tool)
-chromium --headless --no-sandbox --dump-dom https://example.com
-</code></pre>
+<pre class="astro-code astro-code-themes min-light github-dark" style="background-color:#ffffff;--shiki-dark-bg:#24292e;color:#24292eff;--shiki-dark:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash" data-code="# Inside sandbox (via exec tool)
+chromium --headless --no-sandbox --dump-dom https://example.com"><code><span class="line"><span style="color:#C2C3C5;--shiki-dark:#6A737D"># Inside sandbox (via exec tool)</span></span>
+<span class="line"><span style="color:#6F42C1;--shiki-dark:#B392F0">chromium</span><span style="color:#2B5581;--shiki-dark:#79B8FF"> --headless</span><span style="color:#2B5581;--shiki-dark:#79B8FF"> --no-sandbox</span><span style="color:#2B5581;--shiki-dark:#79B8FF"> --dump-dom</span><span style="color:#2B5581;--shiki-dark:#9ECBFF"> https://example.com</span></span></code></pre>
 <p>Or use Puppeteer/Playwright in a Node.js script executed via the <code>exec</code> tool.</p>
-<h2 id="security-considerations"><a class="header" href="#security-considerations">Security Considerations</a></h2>
-<h3 id="prompt-injection-risk"><a class="header" href="#prompt-injection-risk">Prompt Injection Risk</a></h3>
+<h2 id="security-considerations">Security Considerations</h2>
+<h3 id="prompt-injection-risk">Prompt Injection Risk</h3>
 <p><strong>Important</strong>: Web pages can contain content designed to manipulate LLM behavior
 (prompt injection). When the browser tool returns page content to the LLM,
 malicious sites could attempt to inject instructions.</p>
@@ -488,7 +542,7 @@ Docker container for additional security. Browser sandbox follows session
 sandbox mode automatically.</p>
 </li>
 </ol>
-<h3 id="other-security-considerations"><a class="header" href="#other-security-considerations">Other Security Considerations</a></h3>
+<h3 id="other-security-considerations">Other Security Considerations</h3>
 <ol>
 <li>
 <p><strong>Host vs Sandbox mode</strong>: Browser sandbox mode follows the session’s sandbox
@@ -498,7 +552,7 @@ on the host with <code>--no-sandbox</code> for container compatibility.</p>
 </li>
 <li>
 <p><strong>Resource limits</strong>: Browser instances are limited by memory usage (default:
-block when &gt; 90% used). Set <code>max_instances &gt; 0</code> for a hard limit.</p>
+block when > 90% used). Set <code>max_instances > 0</code> for a hard limit.</p>
 </li>
 <li>
 <p><strong>Idle cleanup</strong>: Browsers are automatically closed after <code>idle_timeout_secs</code>
@@ -514,7 +568,7 @@ Use firewall rules for additional restrictions.</p>
 Playwright) inherit sandbox network restrictions (<code>no_network: true</code> by default).</p>
 </li>
 </ol>
-<h2 id="browser-detection"><a class="header" href="#browser-detection">Browser Detection</a></h2>
+<h2 id="browser-detection">Browser Detection</h2>
 <p>Moltis automatically detects installed Chromium-based browsers in the following order:</p>
 <ol>
 <li><strong>Custom path</strong> from <code>chrome_path</code> config</li>
@@ -528,7 +582,7 @@ Playwright) inherit sandbox network restrictions (<code>no_network: true</code> 
 <li><strong>PATH executables</strong> (fallback): <code>chrome</code>, <code>chromium</code>, <code>msedge</code>, <code>brave</code>, etc.</li>
 </ol>
 <p>If no browser is found, Moltis displays platform-specific installation instructions.</p>
-<h3 id="supported-browsers"><a class="header" href="#supported-browsers">Supported Browsers</a></h3>
+<h3 id="supported-browsers">Supported Browsers</h3>
 <p>Any Chromium-based browser works:</p>
 <ul>
 <li>Google Chrome</li>
@@ -539,7 +593,7 @@ Playwright) inherit sandbox network restrictions (<code>no_network: true</code> 
 <li>Vivaldi</li>
 <li>Arc (macOS)</li>
 </ul>
-<h2 id="screenshot-display"><a class="header" href="#screenshot-display">Screenshot Display</a></h2>
+<h2 id="screenshot-display">Screenshot Display</h2>
 <p>When the browser tool takes a screenshot, it’s displayed in the chat UI:</p>
 <ul>
 <li><strong>Thumbnail view</strong>: Screenshots appear as clickable thumbnails (200×150px max)</li>
@@ -552,14 +606,14 @@ Playwright) inherit sandbox network restrictions (<code>no_network: true</code> 
 <p>Screenshots are base64-encoded PNGs returned in the tool result. The
 <code>device_scale_factor</code> config (default: 2.0) controls the rendering resolution
 for high-DPI displays.</p>
-<h3 id="telegram-integration"><a class="header" href="#telegram-integration">Telegram Integration</a></h3>
+<h3 id="telegram-integration">Telegram Integration</h3>
 <p>When using the Telegram channel, screenshots are automatically sent to the chat:</p>
 <ul>
 <li>Images sent as photos when dimensions are within Telegram limits</li>
-<li>Automatically retried as documents for oversized images (aspect ratio &gt; 20)</li>
+<li>Automatically retried as documents for oversized images (aspect ratio > 20)</li>
 <li>Error messages sent to channel if delivery fails</li>
 </ul>
-<h2 id="handling-model-errors"><a class="header" href="#handling-model-errors">Handling Model Errors</a></h2>
+<h2 id="handling-model-errors">Handling Model Errors</h2>
 <p>Some models (particularly Claude via GitHub Copilot) occasionally send malformed
 tool calls with missing required fields. Moltis handles this gracefully:</p>
 <ul>
@@ -569,8 +623,8 @@ tool calls with missing required fields. Moltis handles this gracefully:</p>
 <li><strong>Muted error display</strong>: Validation errors show as muted/informational cards
 in the UI (60% opacity, gray text) to indicate they’re expected, not alarming</li>
 </ul>
-<h2 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h2>
-<h3 id="browser-not-launching"><a class="header" href="#browser-not-launching">Browser not launching</a></h3>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<h3 id="browser-not-launching">Browser not launching</h3>
 <ul>
 <li>Ensure Chrome/Chromium is installed</li>
 <li>Check <code>chrome_path</code> in config if using custom location</li>
@@ -579,82 +633,157 @@ in the UI (60% opacity, gray text) to indicate they’re expected, not alarming<
 <li>On macOS, if using Homebrew Chromium, prefer installing Google Chrome or Brave
 (the Homebrew chromium wrapper can be unreliable)</li>
 </ul>
-<h3 id="elements-not-found"><a class="header" href="#elements-not-found">Elements not found</a></h3>
+<h3 id="elements-not-found">Elements not found</h3>
 <ul>
 <li>Use <code>snapshot</code> to see available elements</li>
 <li>Elements must be visible in the viewport</li>
 <li>Some elements may need scrolling first</li>
 </ul>
-<h3 id="timeouts"><a class="header" href="#timeouts">Timeouts</a></h3>
+<h3 id="timeouts">Timeouts</h3>
 <ul>
 <li>Increase <code>navigation_timeout_ms</code> for slow pages</li>
 <li>Use <code>wait</code> action to wait for dynamic content</li>
 <li>Check network connectivity</li>
 </ul>
-<h3 id="high-memory-usage"><a class="header" href="#high-memory-usage">High memory usage</a></h3>
+<h3 id="high-memory-usage">High memory usage</h3>
 <ul>
 <li>Browser instances are now limited by memory (blocks at 90% by default)</li>
-<li>Set <code>max_instances &gt; 0</code> for a hard limit if preferred</li>
+<li>Set <code>max_instances > 0</code> for a hard limit if preferred</li>
 <li>Lower <code>idle_timeout_secs</code> to clean up faster</li>
 <li>Consider enabling headless mode if not already</li>
 </ul>
-<h3 id="pool-exhaustion"><a class="header" href="#pool-exhaustion">Pool exhaustion</a></h3>
+<h3 id="pool-exhaustion">Pool exhaustion</h3>
 <ul>
 <li>Browser tool now auto-tracks session IDs, preventing pool exhaustion from
 LLMs that forget to pass session_id</li>
 <li>If you still hit limits, check <code>memory_limit_percent</code> threshold</li>
 <li>Use <code>close</code> action when done to free up sessions</li>
-</ul>
+</ul>  <nav class="pager" aria-label="Page navigation"> <a class="pager-link" href="/channels/telephony.html"><span>Previous</span>Telephony (Phone Calls)</a> <a class="pager-link next" href="/caldav.html"><span>Next</span>CalDAV (Calendars)</a> </nav> </article> <aside class="toc-panel" aria-label="On this page"> <div class="toc-title">On this page</div> <nav id="page-toc"></nav> </aside> </main> </div> <script>(function(){const searchPages = [{"title":"Introduction","slug":"index","sourcePath":"index.md","url":"/index.html","section":"Start","depth":0},{"title":"Quickstart","slug":"quickstart","sourcePath":"quickstart.md","url":"/quickstart.html","section":"Getting Started","depth":0},{"title":"Installation","slug":"installation","sourcePath":"installation.md","url":"/installation.html","section":"Getting Started","depth":0},{"title":"Comparison","slug":"comparison","sourcePath":"comparison.md","url":"/comparison.html","section":"Getting Started","depth":0},{"title":"Configuration","slug":"configuration","sourcePath":"configuration.md","url":"/configuration.html","section":"Getting Started","depth":0},{"title":"Upstream Proxy","slug":"upstream-proxy","sourcePath":"upstream-proxy.md","url":"/upstream-proxy.html","section":"Getting Started","depth":1},{"title":"Configuration Reference","slug":"configuration-reference","sourcePath":"configuration-reference.md","url":"/configuration-reference.html","section":"Getting Started","depth":1},{"title":"Local Validation","slug":"local-validation","sourcePath":"local-validation.md","url":"/local-validation.html","section":"Getting Started","depth":0},{"title":"End-to-End Testing","slug":"e2e-testing","sourcePath":"e2e-testing.md","url":"/e2e-testing.html","section":"Getting Started","depth":0},{"title":"LLM Providers","slug":"providers","sourcePath":"providers.md","url":"/providers.html","section":"Features","depth":0},{"title":"Choosing a Provider","slug":"choosing-a-provider","sourcePath":"choosing-a-provider.md","url":"/choosing-a-provider.html","section":"Features","depth":1},{"title":"Anthropic OAuth (FAQ)","slug":"anthropic-oauth","sourcePath":"anthropic-oauth.md","url":"/anthropic-oauth.html","section":"Features","depth":1},{"title":"MCP Servers","slug":"mcp","sourcePath":"mcp.md","url":"/mcp.html","section":"Features","depth":0},{"title":"External Agents","slug":"external-agents","sourcePath":"external-agents.md","url":"/external-agents.html","section":"Features","depth":0},{"title":"Memory","slug":"memory","sourcePath":"memory.md","url":"/memory.html","section":"Features","depth":0},{"title":"Memory Surfaces","slug":"memory-surfaces","sourcePath":"memory-surfaces.md","url":"/memory-surfaces.html","section":"Features","depth":1},{"title":"Moltis vs OpenClaw","slug":"memory-comparison","sourcePath":"memory-comparison.md","url":"/memory-comparison.html","section":"Features","depth":1},{"title":"Hooks","slug":"hooks","sourcePath":"hooks.md","url":"/hooks.html","section":"Features","depth":0},{"title":"Local LLMs","slug":"local-llm","sourcePath":"local-llm.md","url":"/local-llm.html","section":"Features","depth":0},{"title":"Sandbox","slug":"sandbox","sourcePath":"sandbox.md","url":"/sandbox.html","section":"Features","depth":0},{"title":"Trusted Network","slug":"trusted-network","sourcePath":"trusted-network.md","url":"/trusted-network.html","section":"Features","depth":1},{"title":"Voice","slug":"voice","sourcePath":"voice.md","url":"/voice.html","section":"Features","depth":0},{"title":"Remote Access","slug":"remote-access","sourcePath":"remote-access.md","url":"/remote-access.html","section":"Features","depth":0},{"title":"Channels","slug":"channels","sourcePath":"channels.md","url":"/channels.html","section":"Features","depth":0},{"title":"Telegram","slug":"telegram","sourcePath":"telegram.md","url":"/telegram.html","section":"Features","depth":1},{"title":"Microsoft Teams","slug":"teams","sourcePath":"teams.md","url":"/teams.html","section":"Features","depth":1},{"title":"Discord","slug":"discord","sourcePath":"discord.md","url":"/discord.html","section":"Features","depth":1},{"title":"Slack","slug":"slack","sourcePath":"slack.md","url":"/slack.html","section":"Features","depth":1},{"title":"Matrix","slug":"matrix","sourcePath":"matrix.md","url":"/matrix.html","section":"Features","depth":1},{"title":"WhatsApp","slug":"whatsapp","sourcePath":"whatsapp.md","url":"/whatsapp.html","section":"Features","depth":1},{"title":"Nostr","slug":"nostr","sourcePath":"nostr.md","url":"/nostr.html","section":"Features","depth":1},{"title":"Signal","slug":"signal","sourcePath":"signal.md","url":"/signal.html","section":"Features","depth":1},{"title":"Telephony (Phone Calls)","slug":"channels/telephony","sourcePath":"channels/telephony.md","url":"/channels/telephony.html","section":"Features","depth":1},{"title":"Browser Automation","slug":"browser-automation","sourcePath":"browser-automation.md","url":"/browser-automation.html","section":"Features","depth":0},{"title":"CalDAV (Calendars)","slug":"caldav","sourcePath":"caldav.md","url":"/caldav.html","section":"Features","depth":0},{"title":"GraphQL API","slug":"graphql","sourcePath":"graphql.md","url":"/graphql.html","section":"Features","depth":0},{"title":"Session State","slug":"session-state","sourcePath":"session-state.md","url":"/session-state.html","section":"Features","depth":0},{"title":"Slash Commands","slug":"commands","sourcePath":"commands.md","url":"/commands.html","section":"Features","depth":0},{"title":"Modes","slug":"modes","sourcePath":"modes.md","url":"/modes.html","section":"Features","depth":0},{"title":"Session Branching","slug":"session-branching","sourcePath":"session-branching.md","url":"/session-branching.html","section":"Features","depth":0},{"title":"Checkpoints","slug":"checkpoints","sourcePath":"checkpoints.md","url":"/checkpoints.html","section":"Features","depth":0},{"title":"Compaction","slug":"compaction","sourcePath":"compaction.md","url":"/compaction.html","section":"Features","depth":0},{"title":"Filesystem Tools","slug":"tools-fs","sourcePath":"tools-fs.md","url":"/tools-fs.html","section":"Features","depth":0},{"title":"Scheduling (Cron Jobs)","slug":"scheduling","sourcePath":"scheduling.md","url":"/scheduling.html","section":"Features","depth":0},{"title":"Webhooks","slug":"webhooks","sourcePath":"webhooks.md","url":"/webhooks.html","section":"Features","depth":0},{"title":"Skill Self-Extension","slug":"skill-tools","sourcePath":"skill-tools.md","url":"/skill-tools.html","section":"Features","depth":0},{"title":"Mobile PWA","slug":"mobile-pwa","sourcePath":"mobile-pwa.md","url":"/mobile-pwa.html","section":"Features","depth":0},{"title":"Native Swift Embedding (POC)","slug":"native-swift-embedding","sourcePath":"native-swift-embedding.md","url":"/native-swift-embedding.html","section":"Features","depth":0},{"title":"macOS App FFI Bridge (WIP)","slug":"macos-app-ffi-bridge","sourcePath":"macos-app-ffi-bridge.md","url":"/macos-app-ffi-bridge.html","section":"Features","depth":0},{"title":"OpenClaw Import","slug":"openclaw-import","sourcePath":"openclaw-import.md","url":"/openclaw-import.html","section":"Features","depth":0},{"title":"Multi-Node","slug":"nodes","sourcePath":"nodes.md","url":"/nodes.html","section":"Features","depth":0},{"title":"Service Management","slug":"service","sourcePath":"service.md","url":"/service.html","section":"Features","depth":0},{"title":"Authentication","slug":"authentication","sourcePath":"authentication.md","url":"/authentication.html","section":"Security","depth":0},{"title":"Encryption at Rest (Vault)","slug":"vault","sourcePath":"vault.md","url":"/vault.html","section":"Security","depth":0},{"title":"Security Architecture","slug":"security","sourcePath":"security.md","url":"/security.html","section":"Security","depth":0},{"title":"Third-Party Skills Security","slug":"skills-security","sourcePath":"skills-security.md","url":"/skills-security.html","section":"Security","depth":0},{"title":"Release Verification","slug":"release-verification","sourcePath":"release-verification.md","url":"/release-verification.html","section":"Security","depth":0},{"title":"Docker","slug":"docker","sourcePath":"docker.md","url":"/docker.html","section":"Deployment","depth":0},{"title":"Cloud Deploy","slug":"cloud-deploy","sourcePath":"cloud-deploy.md","url":"/cloud-deploy.html","section":"Deployment","depth":0},{"title":"Remote Sandboxes","slug":"sandbox-remote","sourcePath":"sandbox-remote.md","url":"/sandbox-remote.html","section":"Deployment","depth":0},{"title":"VPS Deployment","slug":"deploy-vps","sourcePath":"deploy-vps.md","url":"/deploy-vps.html","section":"Deployment","depth":0},{"title":"System Prompt","slug":"system-prompt","sourcePath":"system-prompt.md","url":"/system-prompt.html","section":"Architecture","depth":0},{"title":"Frontend","slug":"frontend","sourcePath":"frontend.md","url":"/frontend.html","section":"Architecture","depth":0},{"title":"Streaming","slug":"streaming","sourcePath":"streaming.md","url":"/streaming.html","section":"Architecture","depth":0},{"title":"SQLite Migrations","slug":"sqlite-migration","sourcePath":"sqlite-migration.md","url":"/sqlite-migration.html","section":"Architecture","depth":0},{"title":"Metrics & Tracing","slug":"metrics-and-tracing","sourcePath":"metrics-and-tracing.md","url":"/metrics-and-tracing.html","section":"Architecture","depth":0},{"title":"Tool Registry","slug":"tool-registry","sourcePath":"tool-registry.md","url":"/tool-registry.html","section":"Architecture","depth":0},{"title":"Tool Policy","slug":"tool-policy","sourcePath":"tool-policy.md","url":"/tool-policy.html","section":"Architecture","depth":0},{"title":"Agent Presets","slug":"agent-presets","sourcePath":"agent-presets.md","url":"/agent-presets.html","section":"Architecture","depth":0},{"title":"Session Tools","slug":"session-tools","sourcePath":"session-tools.md","url":"/session-tools.html","section":"Architecture","depth":0},{"title":"Changelog","slug":"changelog","sourcePath":"changelog.md","url":"/changelog.html","section":"Reference","depth":0}];
 
-                    </main>
+    const navToggle = document.querySelector('.nav-toggle')
+    const scrim = document.querySelector('.mobile-scrim')
+    const sidebar = document.querySelector('.sidebar')
+    const activeSidebarLink = sidebar?.querySelector('a.active')
+    const themeButtons = Array.from(document.querySelectorAll('[data-theme-option]'))
+    const themeMedia = window.matchMedia('(prefers-color-scheme: dark)')
 
-                    <nav class="nav-wrapper" aria-label="Page navigation">
-                        <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="whatsapp.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
-                                <i class="fa fa-angle-left"></i>
-                            </a>
+    function applyTheme(choice) {
+      const resolved = choice === 'auto' ? (themeMedia.matches ? 'dark' : 'light') : choice
+      document.documentElement.dataset.theme = resolved
+      document.documentElement.dataset.themeChoice = choice
+      document.querySelector('meta[name="theme-color"]')?.setAttribute('content', resolved === 'dark' ? '#111214' : '#f7f7f5')
+      themeButtons.forEach((button) => {
+        const active = button.dataset.themeOption === choice
+        button.classList.toggle('active', active)
+        button.setAttribute('aria-pressed', String(active))
+      })
+    }
 
-                            <a rel="next prefetch" href="caldav.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
-                                <i class="fa fa-angle-right"></i>
-                            </a>
+    const storedTheme = localStorage.getItem('moltis-docs-theme') || 'auto'
+    applyTheme(storedTheme)
+    themeButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const choice = button.dataset.themeOption || 'auto'
+        localStorage.setItem('moltis-docs-theme', choice)
+        applyTheme(choice)
+      })
+    })
+    themeMedia.addEventListener('change', () => {
+      if ((localStorage.getItem('moltis-docs-theme') || 'auto') === 'auto') {
+        applyTheme('auto')
+      }
+    })
 
-                        <div style="clear: both"></div>
-                    </nav>
-                </div>
-            </div>
+    function closeNav() {
+      document.body.classList.remove('nav-open')
+      navToggle?.setAttribute('aria-expanded', 'false')
+    }
 
-            <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="whatsapp.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
-                        <i class="fa fa-angle-left"></i>
-                    </a>
+    navToggle?.addEventListener('click', () => {
+      const open = document.body.classList.toggle('nav-open')
+      navToggle.setAttribute('aria-expanded', String(open))
+    })
+    scrim?.addEventListener('click', closeNav)
+    sidebar?.querySelectorAll('a').forEach((link) => link.addEventListener('click', closeNav))
+    if (sidebar && activeSidebarLink) {
+      const linkTop = activeSidebarLink.offsetTop
+      const targetTop = linkTop - sidebar.clientHeight / 2 + activeSidebarLink.clientHeight / 2
+      sidebar.scrollTop = Math.max(0, targetTop)
+    }
 
-                    <a rel="next prefetch" href="caldav.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
-                        <i class="fa fa-angle-right"></i>
-                    </a>
-            </nav>
+    const toc = document.getElementById('page-toc')
+    const tocPanel = document.querySelector('.toc-panel')
+    const headings = Array.from(document.querySelectorAll('.content-card h2, .content-card h3'))
+    if (toc && headings.length > 1) {
+      headings.forEach((heading) => {
+        const link = document.createElement('a')
+        link.href = `#${heading.id}`
+        link.textContent = heading.textContent || ''
+        link.className = heading.tagName === 'H3' ? 'toc-h3' : 'toc-h2'
+        toc.appendChild(link)
+      })
+    } else {
+      tocPanel?.classList.add('empty')
+    }
 
-        </div>
+    document.querySelectorAll('pre[data-code]').forEach((pre) => {
+      const button = document.createElement('button')
+      button.className = 'copy-code'
+      button.type = 'button'
+      button.textContent = 'Copy'
+      pre.appendChild(button)
+      button.addEventListener('click', async () => {
+        const code = pre.dataset.code || ''
+        let copied = false
 
+        try {
+          if (navigator.clipboard) {
+            await navigator.clipboard.writeText(code)
+            copied = true
+          }
+        } catch {
+          copied = false
+        }
 
+        if (!copied) {
+          const textarea = document.createElement('textarea')
+          textarea.value = code
+          textarea.setAttribute('readonly', '')
+          textarea.style.position = 'fixed'
+          textarea.style.left = '-9999px'
+          document.body.appendChild(textarea)
+          textarea.select()
+          copied = document.execCommand('copy')
+          textarea.remove()
+        }
 
+        button.textContent = copied ? 'Copied' : 'Failed'
+        window.setTimeout(() => { button.textContent = 'Copy' }, 1200)
+      })
+    })
 
-        <script>
-            window.playground_copyable = true;
-        </script>
+    const search = document.getElementById('docs-search')
+    const results = document.getElementById('search-results')
+    search?.addEventListener('input', () => {
+      const query = search.value.trim().toLowerCase()
+      if (!query || !results) {
+        results.hidden = true
+        return
+      }
+      const matches = searchPages
+        .filter((page) => `${page.title} ${page.section}`.toLowerCase().includes(query))
+        .slice(0, 8)
 
-
-        <script src="elasticlunr.min.js"></script>
-        <script src="mark.min.js"></script>
-        <script src="searcher.js"></script>
-
-        <script src="clipboard.min.js"></script>
-        <script src="highlight.js"></script>
-        <script src="book.js"></script>
-
-        <!-- Custom JS scripts -->
-
-
-
-    </div>
-    </body>
-</html>
+      results.replaceChildren()
+      matches.forEach((page) => {
+        const link = document.createElement('a')
+        const section = document.createElement('span')
+        link.href = page.url
+        section.textContent = page.section
+        link.appendChild(section)
+        link.appendChild(document.createTextNode(page.title))
+        results.appendChild(link)
+      })
+      results.hidden = matches.length === 0
+    })
+  })();</script>  </body></html>
