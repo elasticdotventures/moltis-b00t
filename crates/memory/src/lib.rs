@@ -25,6 +25,7 @@ pub mod tools;
 #[cfg(feature = "file-watcher")]
 pub mod watcher;
 pub mod writer;
+pub mod writer_b00t;
 
 // Re-export run_migrations for consistency with other crates.
 pub use {

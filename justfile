@@ -464,3 +464,13 @@ courier-run *ARGS:
 website-dev:
     node website/scripts/build-changelog.mjs
     node website/scripts/dev-server.mjs
+
+# ── wrkflw — local CI gate ──────────────────────────────────────────────────
+ci-validate:
+    wrkflw validate .github/workflows/ci.yml
+
+ci-local:
+    wrkflw run --runtime emulation .github/workflows/ci.yml
+
+ci-watch:
+    wrkflw watch .github/workflows/ci.yml

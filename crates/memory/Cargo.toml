@@ -34,6 +34,7 @@ async-trait            = { workspace = true }
 base64                 = { workspace = true }
 bytemuck               = { workspace = true }
 chrono                 = { features = ["serde"], workspace = true }
+dirs-next              = { workspace = true }
 directories.workspace  = true
 futures                = { workspace = true }
 llama-cpp-2            = { optional = true, workspace = true }
