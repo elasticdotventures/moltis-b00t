@@ -387,3 +387,13 @@ courier-deploy:
 # Run the APNS push relay (dev).
 courier-run *ARGS:
     cargo run -p moltis-courier -- {{ARGS}}
+
+# ── wrkflw — local CI gate ──────────────────────────────────────────────────
+ci-validate:
+    wrkflw validate .github/workflows/ci.yml
+
+ci-local:
+    wrkflw run --runtime emulation .github/workflows/ci.yml
+
+ci-watch:
+    wrkflw watch .github/workflows/ci.yml
